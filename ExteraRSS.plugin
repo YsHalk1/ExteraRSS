@@ -1,0 +1,2431 @@
+# -*- coding: utf-8 -*-
+"""
+RSS My Feed — fullscreen UI (как импорт) + экран поста + fullscreen изображения.
+
+Фиксы:
+- tguser: подписки больше не исчезают
+- сортировка строго по времени публикации (fallback на fetched_ts)
+- важные "(!)" — жёлтый оттенок
+- клик по картинке в посте -> fullscreen
+- дата/время RU: DD.MM.YYYY HH:MM (без секунд, без +0000)
+- FIX Unknown color: безопасный Color.parseColor + только валидные #AARRGGBB
+
+Доп.фикс:
+- TG посты "только медиа" (без текста/без caption) -> без подписи вообще
+  (не "(медиа)" и не "(без названия)", в ленте скрываем строку title если пустая)
+"""
+
+import json
+import time
+import threading
+import urllib.request
+import xml.etree.ElementTree as ET
+import re
+from typing import Any, Dict, List, Optional, Tuple
+
+from base_plugin import BasePlugin, MenuItemData, MenuItemType
+from ui.settings import Header, Divider, Switch, Text
+
+from android_utils import log, run_on_ui_thread, OnClickListener
+from client_utils import get_last_fragment
+
+from org.telegram.messenger import AndroidUtilities
+
+from android.graphics import Color
+from android.graphics import BitmapFactory
+from android.graphics.drawable import GradientDrawable
+from android.view import Gravity, View, ViewGroup, ViewOutlineProvider
+from android.view import HapticFeedbackConstants
+from android.view.animation import DecelerateInterpolator
+
+from android.widget import FrameLayout, LinearLayout, ScrollView, TextView, ImageView, EditText
+from android.content import Intent
+from android.net import Uri
+
+from datetime import datetime, timezone
+
+from java import dynamic_proxy
+from java.lang import Runnable
+from android.view import MotionEvent
+from android.widget import ProgressBar
+
+
+__id__ = "RssMyFeed"
+__name__ = "RSS Моя лента"
+__description__ = "RSS/Atom + Telegram (@username через t.me/s/) в одной ленте."
+__author__ = "@you"
+__version__ = "1.4.5"
+__icon__ = "msg_list"
+__min_version__ = "11.12.0"
+
+# ---- UI tuning ----
+CORNER_RADIUS_DP = 10  # единое скругление для кнопок/карточек/картинок
+
+
+# ---------------- safe color ----------------
+def _c(hex_color: str, fallback: str = "#FFFFFFFF") -> int:
+    """
+    Safe Color.parseColor:
+    - trims
+    - ensures startswith '#'
+    - accepts only 7 or 9 length: #RRGGBB or #AARRGGBB
+    - returns fallback if invalid
+    """
+    try:
+        s = (hex_color or "").strip()
+        if not s:
+            return Color.parseColor(fallback)
+        if not s.startswith("#"):
+            s = "#" + s
+        if len(s) not in (7, 9):
+            return Color.parseColor(fallback)
+        return Color.parseColor(s)
+    except Exception:
+        try:
+            return Color.parseColor(fallback)
+        except Exception:
+            return 0xFFFFFFFF
+
+
+# ---------------- utils ----------------
+def _clean_reply_for_ui(reply_raw: str, it: Dict[str, Any]) -> str:
+    txt = (reply_raw or "").strip()
+    if not txt:
+        return ""
+
+    # 1) если формат "Name — Text"
+    txt = _reply_text_only(txt)
+
+    # 2) убрать лидирующее "@user:"
+    txt = _strip_leading_handle_line(txt)
+
+    # 3) если начинается с названия/хэндла источника — срезаем
+    src_title = str(it.get("source_title") or "").strip()
+    src_handle = str(it.get("source_handle") or "").strip()
+    src_title_plain = src_title.lstrip("@").strip()
+    src_handle_plain = src_handle.lstrip("@").strip()
+
+    low = txt.lower().strip()
+
+    def _cut_prefix(prefix: str):
+        nonlocal txt, low
+        p = (prefix or "").strip()
+        if not p:
+            return
+        plow = p.lower()
+        for sep in (" ", ":", " —", " -", " — ", " - "):
+            pref = (plow + sep).strip()
+            if low.startswith(pref):
+                txt = txt[len(p):].lstrip(" \t\r\n:-—|")
+                low = txt.lower().strip()
+                return
+
+    _cut_prefix(src_title_plain)
+    _cut_prefix(src_handle_plain)
+
+# 3.5) вырезаем "оригинальное имя канала" (source_title), если оно попало в reply как префикс
+    try:
+        # иногда reply начинается с "Имя Канала:" или "Имя Канала —"
+        real_title = str(it.get("source_title") or "").strip()
+        if real_title:
+            real_title_plain = real_title.strip()
+            # пробуем несколько нормализованных вариантов
+            cand = _norm_name_for_compare(real_title_plain)
+            txt_low = _norm_name_for_compare(txt)
+
+            for sep in (":", "—", "-", "|"):
+                pref = (cand + " " + sep).strip()
+                if txt_low.startswith(pref):
+                    # режем по длине оригинального title (не normalized), чтобы не ломать регистр
+                    txt = txt[len(real_title_plain):].lstrip(" \t\r\n:-—|•·")
+                    break
+
+            # ещё вариант: "Имя Канала " + текст (без разделителя)
+            txt_low = _norm_name_for_compare(txt)
+            if txt_low.startswith(cand + " "):
+                # режем только если дальше явно "контент", иначе можно случайно съесть фразу
+                rest = txt[len(real_title_plain):].lstrip()
+                if rest and (rest[0].isalnum() or rest[0] in "@#("):
+                    txt = rest
+    except Exception:
+        pass
+
+    # 4) ✅ TG reply без "—": "Rofl Plugins spoiler_random (2).plugin"
+    # Считаем, что первые 1-3 слова — "автор", если они "похожи на имя",
+    # а следующий токен уже "похож на содержимое" (файл/ссылка/подчёркивания/скобки/точка).
+    if " — " not in (reply_raw or ""):
+        try:
+            parts = txt.split()
+            if len(parts) >= 3:
+                def is_name_word(w: str) -> bool:
+                    # только буквы (лат/кирилл), без цифр/._()/-
+                    if not w:
+                        return False
+                    for ch in w:
+                        if not (ch.isalpha() or ch in "’'"):
+                            return False
+                    return True
+
+                def looks_like_content(w: str) -> bool:
+                    if not w:
+                        return False
+                    # файлы/никнеймы/ссылки/скобки/точки/подчёркивания/цифры
+                    if any(x in w for x in (".", "_", "(", ")", "/", "://", "@")):
+                        return True
+                    if any(ch.isdigit() for ch in w):
+                        return True
+                    return False
+
+                # пробуем 2 слова имени
+                if is_name_word(parts[0]) and is_name_word(parts[1]) and looks_like_content(parts[2]):
+                    txt = " ".join(parts[2:]).strip()
+                # пробуем 1 слово имени
+                elif is_name_word(parts[0]) and looks_like_content(parts[1]):
+                    txt = " ".join(parts[1:]).strip()
+                # пробуем 3 слова имени
+                elif len(parts) >= 4 and is_name_word(parts[0]) and is_name_word(parts[1]) and is_name_word(parts[2]) and looks_like_content(parts[3]):
+                    txt = " ".join(parts[3:]).strip()
+        except Exception:
+            pass
+
+    return txt.strip()
+
+def _reply_text_only(reply_raw: str) -> str:
+    s = (reply_raw or "").strip()
+    if not s:
+        return ""
+    # чаще всего "Name — Text"
+    if " — " in s:
+        parts = s.split(" — ", 1)
+        tail = (parts[1] or "").strip()
+        return tail if tail else s
+    return s
+
+def _ensure_at(src: str) -> str:
+    s = (src or "").strip()
+    if not s:
+        return ""
+    if s.startswith("@"):
+        return s
+    # если это tguser source, оно уже "@username", но на всякий случай:
+    return "@" + s
+
+def _format_source_line(it: Dict[str, Any]) -> str:
+    h = (it.get("source_handle") or "").strip()
+    t = (it.get("source_title") or "").strip()
+
+    if h and not h.startswith("@"):
+        h = "@" + h
+
+    if h and t:
+        # чтобы не было "@rofl – @rofl"
+        if t != h:
+            return f"{h} – {t}"
+        return h
+
+    # fallback старое поведение
+    s = (it.get("source") or "").strip()
+    if s and not s.startswith("@") and h:
+        return h
+    return s or h
+
+def _preview_text(text: str, max_len: int = 170, title: str = "") -> str:
+    t = (text or "").strip()
+    if not t:
+        return ""
+    # если title совпадает с первой строкой — убираем её из превью
+    if title:
+        first = t.split("\n", 1)[0].strip()
+        if first and title.strip() == first:
+            t = t.split("\n", 1)[1].strip() if "\n" in t else ""
+    if not t:
+        return ""
+    t = re.sub(r"\s+", " ", t).strip()
+    if len(t) <= max_len:
+        return t
+    return t[:max_len - 1].rstrip() + "…"
+
+def _dp(x: float) -> int:
+    return AndroidUtilities.dp(float(x))
+
+
+def _safe_json_load(s: Any, default):
+    try:
+        if isinstance(s, str) and s.strip():
+            return json.loads(s)
+    except Exception:
+        pass
+    return default
+
+
+def _now_ts() -> int:
+    return int(time.time())
+
+
+def _strip_ns(tag: str) -> str:
+    if "}" in tag:
+        return tag.split("}", 1)[1]
+    return tag
+
+
+def _text(node) -> str:
+    if node is None:
+        return ""
+    return (node.text or "").strip()
+
+
+def _join_text(node) -> str:
+    if node is None:
+        return ""
+    parts = []
+    try:
+        for t in node.itertext():
+            if t:
+                parts.append(t)
+    except Exception:
+        pass
+    return (" ".join(parts)).strip()
+
+
+def _uniq_keep_order(lst: List[str]) -> List[str]:
+    seen = set()
+    out = []
+    for x in lst:
+        if x in seen:
+            continue
+        seen.add(x)
+        out.append(x)
+    return out
+
+
+def _statusbar_pad() -> int:
+    try:
+        sb = int(getattr(AndroidUtilities, "statusBarHeight", 0))
+        if sb > 0:
+            return sb
+    except Exception:
+        pass
+    return _dp(24)
+
+
+# ---------- normalize subscription ----------
+def _norm_sub(line: str) -> Optional[str]:
+    """
+    Valid:
+    - tguser:username  (already normalized)
+    - @username        -> tguser:username
+    - t.me/s/username  -> tguser:username
+    - https://...      -> https://...
+    """
+    if not isinstance(line, str):
+        return None
+    s = line.strip()
+    if not s:
+        return None
+
+    if s.startswith("tguser:"):
+        u = s.split(":", 1)[1].strip()
+        return ("tguser:" + u) if u else None
+
+    if s.startswith("@"):
+        u = s[1:].strip()
+        return ("tguser:" + u) if u else None
+
+    if s.startswith("t.me/s/") or s.startswith("telegram.me/s/"):
+        u = s.split("/s/", 1)[1].strip("/ ")
+        return ("tguser:" + u) if u else None
+
+    if s.startswith("http://") or s.startswith("https://"):
+        low = s.lower()
+        if "t.me/s/" in low:
+            try:
+                u = s.split("t.me/s/", 1)[1].strip("/ ")
+                return ("tguser:" + u) if u else None
+            except Exception:
+                pass
+        return s
+
+    return None
+
+
+# ---------- HTML cleaning ----------
+def _html_unescape_basic(s: str) -> str:
+    if not s:
+        return ""
+
+    # named entities
+    s = s.replace("&nbsp;", " ")
+    s = s.replace("&quot;", "\"")
+    s = s.replace("&apos;", "'")
+    s = s.replace("&lt;", "<")
+    s = s.replace("&gt;", ">")
+    s = s.replace("&amp;", "&")
+
+    # numeric entities: &#33; and &#x21;
+    def _rep_num(m):
+        try:
+            code = int(m.group(1))
+            if 0 <= code <= 0x10FFFF:
+                return chr(code)
+        except Exception:
+            pass
+        return m.group(0)
+
+    def _rep_hex(m):
+        try:
+            code = int(m.group(1), 16)
+            if 0 <= code <= 0x10FFFF:
+                return chr(code)
+        except Exception:
+            pass
+        return m.group(0)
+
+    s = re.sub(r"&#(\d+);", _rep_num, s)
+    s = re.sub(r"&#x([0-9a-fA-F]+);", _rep_hex, s)
+
+    return s
+
+
+def _strip_tags_and_format(s: str) -> str:
+    if not s:
+        return ""
+
+    x = s
+    x = x.replace("<br/>", "\n").replace("<br />", "\n").replace("<br>", "\n")
+    x = x.replace("</p>", "\n").replace("<p>", "")
+    x = x.replace("</div>", "\n").replace("<div>", "")
+    x = x.replace("</li>", "\n").replace("<li>", "• ")
+    x = x.replace("</ul>", "\n").replace("<ul>", "")
+    x = x.replace("</ol>", "\n").replace("<ol>", "")
+
+    out = []
+    in_tag = False
+    for ch in x:
+        if ch == "<":
+            in_tag = True
+            continue
+        if ch == ">":
+            in_tag = False
+            continue
+        if not in_tag:
+            out.append(ch)
+    x = "".join(out)
+
+    x = _html_unescape_basic(x)
+    x = x.replace("\r\n", "\n").replace("\r", "\n")
+
+    lines = [ln.strip() for ln in x.split("\n")]
+    cleaned = []
+    empty_run = 0
+    for ln in lines:
+        if not ln:
+            empty_run += 1
+            if empty_run <= 1:
+                cleaned.append("")
+        else:
+            empty_run = 0
+            cleaned.append(ln)
+
+    return "\n".join(cleaned).strip()
+
+
+# ---------- date parsing / formatting ----------
+_RSS_MONTHS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12
+}
+
+
+def _parse_rfc822_dt(s: str) -> Optional[datetime]:
+    if not s:
+        return None
+    x = s.strip()
+
+    if "," in x:
+        parts = x.split(",", 1)
+        if len(parts) == 2 and len(parts[0].strip()) <= 4:
+            x = parts[1].strip()
+
+    x = x.replace(" GMT", " +0000").replace(" UT", " +0000").replace(" UTC", " +0000")
+    toks = x.split()
+    if len(toks) < 4:
+        return None
+    try:
+        day = int(toks[0])
+        mon = _RSS_MONTHS.get(toks[1].lower(), 0)
+        if mon <= 0:
+            return None
+        year = int(toks[2])
+
+        hh, mm, ss = 0, 0, 0
+        tt = toks[3].split(":")
+        if len(tt) >= 2:
+            hh = int(tt[0])
+            mm = int(tt[1])
+        if len(tt) >= 3:
+            ss = int(tt[2])
+
+        tz = None
+        if len(toks) >= 5:
+            z = toks[4].strip().replace(":", "")
+            if z and (z[0] in "+-" and len(z) == 5):
+                sign = 1 if z[0] == "+" else -1
+                zh = int(z[1:3])
+                zm = int(z[3:5])
+                tz = timezone(sign * (zh * 3600 + zm * 60))
+        if tz is None:
+            tz = timezone.utc
+        return datetime(year, mon, day, hh, mm, ss, tzinfo=tz)
+    except Exception:
+        return None
+
+
+def _parse_iso8601_dt(s: str) -> Optional[datetime]:
+    if not s:
+        return None
+    x = s.strip()
+    try:
+        if x.endswith("Z"):
+            x = x[:-1] + "+00:00"
+        return datetime.fromisoformat(x)
+    except Exception:
+        try:
+            base = x[:19]
+            dt = datetime.strptime(base, "%Y-%m-%dT%H:%M:%S")
+            return dt.replace(tzinfo=timezone.utc)
+        except Exception:
+            return None
+
+
+def _parse_published_to_ts(published: str) -> int:
+    if not published:
+        return 0
+    dt = _parse_rfc822_dt(published) or _parse_iso8601_dt(published)
+    if dt is None:
+        return 0
+    try:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp())
+    except Exception:
+        return 0
+
+
+def _format_ru_datetime(ts: int) -> str:
+    if not ts:
+        return ""
+    try:
+        lt = time.localtime(int(ts))
+        return time.strftime("%d.%m.%Y %H:%M", lt)
+    except Exception:
+        return ""
+
+
+# ---------------- HTTP ----------------
+def _http_get(url: str, timeout_sec: int = 12) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": "Exteragram-RSS-Plugin/1.4.4"})
+    with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+        return resp.read()
+
+
+# ---------------- RSS/Atom parsing ----------------
+def _best_image_from_rss_item(it: ET.Element) -> str:
+    try:
+        for enc in it.findall("enclosure"):
+            url = (enc.attrib.get("url") or "").strip()
+            typ = (enc.attrib.get("type") or "").strip().lower()
+            if url and (typ.startswith("image/") or url.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))):
+                return url
+    except Exception:
+        pass
+
+    try:
+        for el in it.iter():
+            name = _strip_ns(el.tag).lower()
+            if name in ("thumbnail", "content"):
+                url = (el.attrib.get("url") or el.attrib.get("src") or "").strip()
+                typ = (el.attrib.get("type") or "").strip().lower()
+                if url and (typ.startswith("image/") or url.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))):
+                    return url
+    except Exception:
+        pass
+
+    return ""
+
+_RE_LEADING_HANDLE = re.compile(r"^\s*@[\w\d_]{3,32}\s*:\s*", re.I)
+
+def _norm_name_for_compare(s: str) -> str:
+    # упрощаем для сравнения (без эмодзи/символов)
+    x = (s or "").strip().lower()
+    x = re.sub(r"\s+", " ", x).strip()
+    # убираем “мусорные” разделители в конце имени
+    x = x.strip(":-—|•·")
+    return x
+
+def _strip_leading_handle_line(s: str) -> str:
+    if not s:
+        return ""
+    lines = s.split("\n")
+    if not lines:
+        return s
+    # если первая строка выглядит как "@name:" — убираем её
+    if _RE_LEADING_HANDLE.match(lines[0].strip()):
+        return "\n".join(lines[1:]).lstrip()
+    return s
+
+def _best_image_from_atom_entry(e: ET.Element) -> str:
+    try:
+        for l in e.iter():
+            if _strip_ns(l.tag).lower() != "link":
+                continue
+            href = (l.attrib.get("href") or "").strip()
+            rel = (l.attrib.get("rel") or "").strip().lower()
+            typ = (l.attrib.get("type") or "").strip().lower()
+            if href and rel == "enclosure" and (typ.startswith("image/") or href.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))):
+                return href
+    except Exception:
+        pass
+
+    try:
+        for el in e.iter():
+            name = _strip_ns(el.tag).lower()
+            if name in ("thumbnail", "content"):
+                url = (el.attrib.get("url") or el.attrib.get("src") or "").strip()
+                typ = (el.attrib.get("type") or "").strip().lower()
+                if url and (typ.startswith("image/") or url.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))):
+                    return url
+    except Exception:
+        pass
+
+    return ""
+
+
+def parse_feed(xml_bytes: bytes, source_url: str) -> Tuple[str, List[Dict[str, Any]]]:
+    items: List[Dict[str, Any]] = []
+    try:
+        root = ET.fromstring(xml_bytes)
+    except Exception:
+        return (source_url, items)
+
+    root_name = _strip_ns(root.tag).lower()
+
+    if root_name == "rss":
+        channel = root.find("channel")
+        if channel is None:
+            return (source_url, items)
+
+        src_title = _text(channel.find("title")) or source_url
+
+        for it in channel.findall("item"):
+            title = _text(it.find("title"))
+            link = _text(it.find("link"))
+
+            pub_raw = _text(it.find("pubDate")) or _text(it.find("date"))
+            if not pub_raw:
+                try:
+                    for el in it.iter():
+                        n = _strip_ns(el.tag).lower()
+                        if n in ("date", "pubdate", "updated", "published"):
+                            v = _join_text(el)
+                            if v:
+                                pub_raw = v.strip()
+                                break
+                except Exception:
+                    pass
+
+            if not link:
+                guid = _text(it.find("guid"))
+                if guid.startswith("http://") or guid.startswith("https://"):
+                    link = guid
+
+            desc = _join_text(it.find("description"))
+            if not desc:
+                try:
+                    for el in it.iter():
+                        if _strip_ns(el.tag).lower() in ("encoded", "content"):
+                            txt = _join_text(el)
+                            if txt:
+                                desc = txt
+                                break
+                except Exception:
+                    pass
+
+            img = _best_image_from_rss_item(it)
+            ts = _parse_published_to_ts(pub_raw)
+
+            if link:
+                items.append({
+                    "title": title,
+                    "link": link,
+                    "published_raw": pub_raw,
+                    "ts": ts,
+                    "source": src_title,
+                    "text": desc,
+                    "image": img,
+                })
+
+        return (src_title, items)
+
+    if root_name == "feed":
+        ns = ""
+        if root.tag.startswith("{") and "}" in root.tag:
+            ns = root.tag.split("}", 1)[0].strip("{")
+
+        def q(name: str) -> str:
+            return f"{{{ns}}}{name}" if ns else name
+
+        src_title = _text(root.find(q("title"))) or source_url
+
+        for e in root.findall(q("entry")):
+            title = _text(e.find(q("title")))
+            pub_raw = _text(e.find(q("updated"))) or _text(e.find(q("published")))
+
+            link = ""
+            for l in e.findall(q("link")):
+                href = l.attrib.get("href", "")
+                rel = l.attrib.get("rel", "")
+                if href and (rel == "" or rel == "alternate"):
+                    link = href
+                    break
+
+            desc = _join_text(e.find(q("summary"))) or _join_text(e.find(q("content")))
+            img = _best_image_from_atom_entry(e)
+            ts = _parse_published_to_ts(pub_raw)
+
+            if link:
+                items.append({
+                    "title": title,
+                    "link": link,
+                    "published_raw": pub_raw,
+                    "ts": ts,
+                    "source": src_title,
+                    "text": desc,
+                    "image": img,
+                })
+
+        return (src_title, items)
+
+    return (source_url, items)
+
+
+# ---------------- Telegram local (t.me/s/<username>) ----------------
+# ---------------- Telegram local (t.me/s/<username>) ----------------
+
+# wrap
+_RE_TG_WRAP = re.compile(
+    r"<div[^>]+class=['\"][^'\"]*\btgme_widget_message_wrap\b[^'\"]*['\"][^>]*>(.*?)</div>\s*</div>\s*</div>",
+    re.S | re.I
+)
+
+# time
+_RE_TG_TIME = re.compile(r"<time[^>]+datetime=['\"]([^'\"]+)['\"]", re.S | re.I)
+
+# text / caption (важно: допускаем ' и ")
+_RE_TG_TEXT = re.compile(
+    r"<div[^>]+class=['\"][^'\"]*\btgme_widget_message_text\b[^'\"]*['\"][^>]*>(.*?)</div>",
+    re.S | re.I
+)
+
+_RE_TG_CAPTION = re.compile(
+    r"<div[^>]+class=['\"][^'\"]*\btgme_widget_message_caption\b[^'\"]*['\"][^>]*>(.*?)</div>",
+    re.S | re.I
+)
+
+# media urls (style может быть в ' или ", и url('')/url("")
+_RE_TG_PHOTO_STYLE = re.compile(
+    r"tgme_widget_message_photo_wrap[^>]*style=['\"][^'\"]*url\((?:'|\")?([^'\")]+)",
+    re.S | re.I
+)
+
+_RE_TG_VIDEO_STYLE = re.compile(
+    r"tgme_widget_message_video_thumb[^>]*style=['\"][^'\"]*url\((?:'|\")?([^'\")]+)",
+    re.S | re.I
+)
+
+# sticker (src может быть в ' или ")
+_RE_TG_STICKER_IMG = re.compile(
+    r"tgme_widget_message_sticker[^>]*src=['\"]([^'\"]+)['\"]",
+    re.S | re.I
+)
+
+# message id
+_RE_TG_MSG_ID = re.compile(r"data-post=['\"]([^'\"]+)['\"]", re.S | re.I)
+
+# document filename
+_RE_TG_DOC_NAME = re.compile(
+    r"<div[^>]+class=['\"][^'\"]*\btgme_widget_message_document_name\b[^'\"]*['\"][^>]*>(.*?)</div>",
+    re.S | re.I
+)
+_RE_TG_DATE_HREF = re.compile(
+    r'<a[^>]+class="[^"]*\btgme_widget_message_date\b[^"]*"[^>]+href="([^"]+)"',
+    re.S | re.I
+)
+
+_RE_TG_TEXT_JS = re.compile(
+    r"<div[^>]+class=['\"][^'\"]*\bjs-message_text\b[^'\"]*['\"][^>]*>(.*?)</div>",
+    re.S | re.I
+)
+
+_RE_TG_BUBBLE = re.compile(
+    r"<div[^>]+class=['\"][^'\"]*\btgme_widget_message_bubble\b[^'\"]*['\"][^>]*>(.*?)<div[^>]+class=['\"][^'\"]*\btgme_widget_message_footer\b",
+    re.S | re.I
+)
+
+_RE_TG_FOOTER = re.compile(
+    r"<div[^>]+class=['\"][^'\"]*\btgme_widget_message_footer\b[^'\"]*['\"][^>]*>.*?</div>",
+    re.S | re.I
+)
+
+# было: _RE_TG_REPLY_NAME = re.compile(r"<div ...reply_name...>(.*?)</div>", ...)
+# стало:
+_RE_TG_REPLY_NAME = re.compile(
+    r"<(?P<tag>\w+)[^>]*class=['\"][^'\"]*\btgme_widget_message_reply_name\b[^'\"]*['\"][^>]*>(?P<inner>.*?)</(?P=tag)>",
+    re.S | re.I
+)
+
+_RE_TG_REPLY_TEXT = re.compile(
+    r"<(?P<tag>\w+)[^>]*class=['\"][^'\"]*\btgme_widget_message_reply_text\b[^'\"]*['\"][^>]*>(?P<inner>.*?)</(?P=tag)>",
+    re.S | re.I
+)
+
+_RE_TG_REPLY_AUTHOR_ALT = re.compile(
+    r"<(?P<tag>\w+)[^>]*class=['\"][^'\"]*\btgme_widget_message_reply_author\b[^'\"]*['\"][^>]*>(?P<inner>.*?)</(?P=tag)>",
+    re.S | re.I
+)
+
+_RE_TG_REPLY_TEXT_ALT = re.compile(
+    r"<(?P<tag>\w+)[^>]*class=['\"][^'\"]*\btgme_widget_message_reply_snippet\b[^'\"]*['\"][^>]*>(?P<inner>.*?)</(?P=tag)>",
+    re.S | re.I
+)
+
+_RE_TG_REPLY_BLOCK = re.compile(
+    r"<(?P<tag>a|div|span)[^>]*class=['\"][^'\"]*\btgme_widget_message_reply\b[^'\"]*['\"][^>]*>[\s\S]*?</(?P=tag)>",
+    re.S | re.I
+)
+
+_RE_TG_REPLY_BLOCK_INNER = re.compile(
+    r"<(?P<tag>a|div|span)[^>]*class=['\"][^'\"]*\btgme_widget_message_reply\b[^'\"]*['\"][^>]*>(?P<inner>[\s\S]*?)</(?P=tag)>",
+    re.S | re.I
+)
+
+_RE_TG_PAGE_TITLE = re.compile(
+    r'<div[^>]+class=["\']tgme_page_title["\'][^>]*>\s*(?:<span[^>]*>)?\s*(.*?)\s*(?:</span>)?\s*</div>',
+    re.S | re.I
+)
+_RE_OG_TITLE = re.compile(
+    r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']',
+    re.S | re.I
+)
+
+def _extract_tg_channel_title(html: str, username: str) -> str:
+    if not html:
+        return f"@{username}"
+    try:
+        m = _RE_TG_PAGE_TITLE.search(html)
+        if m:
+            t = _strip_tags_and_format(m.group(1) or "").strip()
+            if t:
+                return t
+    except Exception:
+        pass
+
+    try:
+        m = _RE_OG_TITLE.search(html)
+        if m:
+            t = _strip_tags_and_format(m.group(1) or "").strip()
+            # часто og:title = "ChannelName — Telegram"
+            t = t.replace("— Telegram", "").replace("- Telegram", "").strip()
+            if t:
+                return t
+    except Exception:
+        pass
+
+    return f"@{username}"
+
+
+def _extract_tg_reply(block_html: str) -> str:
+    if not block_html:
+        return ""
+    if "tgme_widget_message_reply" not in block_html:
+        return ""
+
+    try:
+        text = ""
+
+        # основной вариант
+        mt = _RE_TG_REPLY_TEXT.search(block_html)
+        if mt:
+            text = _strip_tags_and_format(mt.group("inner") or "").strip()
+
+        # альтернативный вариант
+        if not text:
+            mt2 = _RE_TG_REPLY_TEXT_ALT.search(block_html)
+            if mt2:
+                text = _strip_tags_and_format(mt2.group("inner") or "").strip()
+
+        # если текста нет — берём сырой текст из reply блока и чистим
+        if not text:
+            m = _RE_TG_REPLY_BLOCK_INNER.search(block_html)
+            if m:
+                raw = _strip_tags_and_format(m.group("inner") or "").strip()
+                raw = re.sub(r"\s+", " ", raw).strip()
+                text = raw
+
+        text = (text or "").strip()
+        if not text:
+            return ""
+
+        # точечный анти-мусор
+        if text.lower() in ("test", "тест"):
+            return ""
+
+        return text[:180]
+    except Exception:
+        return ""
+
+def _extract_tg_doc_name(block_html: str) -> str:
+    m = _RE_TG_DOC_NAME.search(block_html)
+    if not m:
+        return ""
+    return _strip_tags_and_format(m.group(1) or "").strip()
+
+def _best_tg_media_url(block_html: str) -> str:
+    m = _RE_TG_PHOTO_STYLE.search(block_html)
+    if m:
+        u = (m.group(1) or "").strip()
+        if u.startswith("//"):
+            u = "https:" + u
+        return u
+
+    m = _RE_TG_VIDEO_STYLE.search(block_html)
+    if m:
+        u = (m.group(1) or "").strip()
+        if u.startswith("//"):
+            u = "https:" + u
+        return u
+
+    m = _RE_TG_STICKER_IMG.search(block_html)
+    if m:
+        u = (m.group(1) or "").strip()
+        if u.startswith("//"):
+            u = "https:" + u
+        return u
+
+    return ""
+
+
+def _extract_tg_text(block_html: str) -> str:
+    if not block_html:
+        return ""
+
+    # 1) Берём только внутренность bubble (там и reply, и сам текст)
+    m_b = _RE_TG_BUBBLE.search(block_html)
+    scope = m_b.group(1) if m_b else block_html
+
+    # 2) Удаляем reply-preview и footer, чтобы reply_text (цитата) не мешала
+    scope = _RE_TG_REPLY_BLOCK.sub("", scope)
+    scope = _RE_TG_FOOTER.sub("", scope)
+
+    # 3) Ищем возможные контейнеры текста.
+    # Важно: если почему-то нашлось несколько — берём ПОСЛЕДНИЙ (обычно это именно текст ответа)
+    candidates = []
+
+    try:
+        candidates += [m.group(1) for m in _RE_TG_TEXT.finditer(scope) if m and m.group(1)]
+    except Exception:
+        pass
+
+    if not candidates:
+        try:
+            candidates += [m.group(1) for m in _RE_TG_TEXT_JS.finditer(scope) if m and m.group(1)]
+        except Exception:
+            pass
+
+    if not candidates:
+        try:
+            candidates += [m.group(1) for m in _RE_TG_CAPTION.finditer(scope) if m and m.group(1)]
+        except Exception:
+            pass
+
+    if not candidates:
+        return ""
+
+    text_html = candidates[-1]  # ✅ последний блок текста
+    return _strip_tags_and_format(text_html)
+
+def _parse_tg_preview_page(html: str, username: str, channel_title: str) -> Tuple[str, List[Dict[str, Any]]]:
+    src_handle = f"@{username}"
+    src_title = (channel_title or src_handle).strip()
+
+    items: List[Dict[str, Any]] = []
+
+    blocks = _split_tg_blocks(html)
+    if not blocks:
+        blocks = _RE_TG_WRAP.findall(html)
+
+    for b in blocks[:160]:
+        try:
+            log(f"[TGDBG] block_len={len(b)} has_text={('tgme_widget_message_text' in b)} has_reply={('tgme_widget_message_reply' in b)}")
+            dt_iso = _extract_tg_time_iso(b)
+            ts = _parse_published_to_ts(dt_iso)
+
+            post_link = f"https://t.me/s/{username}"
+            tg_post_id = ""
+
+            m2 = _RE_TG_MSG_ID.search(b)
+            if m2:
+                mid = (m2.group(1) or "").strip()
+                if mid:
+                    tg_post_id = mid
+                    if "/" in mid:
+                        post_link = f"https://t.me/{mid}"
+
+            text = _extract_tg_text(b)
+            text = _strip_leading_handle_line(text)
+            reply = _extract_tg_reply(b)
+            if reply:
+                log(f"[TGDBG2] reply='{reply[:60]}' text_head='{(text.splitlines()[0] if text else '')[:60]}'")
+
+            doc_name = _extract_tg_doc_name(b)
+
+            if text:
+                first = text.split("\n", 1)[0].strip()
+                first = _RE_LEADING_HANDLE.sub("", first).strip()
+                title = first[:120] if first else ""
+            elif reply:
+                title = reply[:120]
+            elif doc_name:
+                title = doc_name[:120]
+            else:
+                title = ""
+
+            img = _best_tg_media_url(b)
+
+            items.append({
+                "source": src_title,          # что показываем в ленте
+                "source_handle": src_handle,  # @username
+                "source_title": src_title,    # title (пока = @username)
+                "title": title,
+                "link": post_link,
+                "tg_post_id": tg_post_id,
+                "published_raw": dt_iso,
+                "ts": ts,
+                "text": text,
+                "image": img,
+                "reply": reply,
+                "doc": doc_name,
+            })
+        except Exception as e:
+            log(f"[TG] parse block error: {e}")
+            continue
+
+    # важно: возвращаем то же, что раньше ждёт _refresh_now
+    return (src_title, items)
+
+_DIVTAG = re.compile(r"</div\s*>|<div\b", re.I)
+
+def _split_tg_blocks(html: str) -> List[str]:
+    if not html:
+        return []
+
+    marks = [m.start() for m in re.finditer(r"tgme_widget_message_wrap", html)]
+    if not marks:
+        return []
+
+    out: List[str] = []
+    n = len(html)
+
+    for pos in marks[:220]:
+        start = html.rfind("<div", 0, pos)
+        if start < 0:
+            continue
+
+        depth = 0
+        i = start
+        end = -1
+
+        while i < n:
+            m = _DIVTAG.search(html, i)
+            if not m:
+                break
+
+            tok = m.group(0).lower()
+            if tok.startswith("<div"):
+                depth += 1
+            else:
+                depth -= 1
+                if depth == 0:
+                    end = m.end()
+                    break
+
+            i = m.end()
+
+        if end > start:
+            out.append(html[start:end])
+
+    return out
+
+def _extract_tg_time_iso(block_html: str) -> str:
+    m = _RE_TG_TIME.search(block_html)
+    if m:
+        return (m.group(1) or "").strip()
+
+    m2 = re.search(r"datetime=['\"]([^'\"]+)['\"]", block_html, re.S | re.I)
+    if m2:
+        return (m2.group(1) or "").strip()
+
+    return ""
+
+
+def _fetch_tg_user_feed(username: str) -> Tuple[str, List[Dict[str, Any]]]:
+    url = f"https://t.me/s/{username}"
+    data = _http_get(url, timeout_sec=14)
+    try:
+        html = data.decode("utf-8", errors="ignore")
+    except Exception:
+        html = str(data)
+
+    ch_title = _extract_tg_channel_title(html, username)  # ✅ настоящее имя
+    return _parse_tg_preview_page(html, username, ch_title)
+
+# ---------------- Plugin ----------------
+class Plugin(BasePlugin):
+    def __init__(self):
+        super().__init__()
+
+        # main
+        self._overlay: Optional[FrameLayout] = None
+        self._content: Optional[LinearLayout] = None
+        self._list_container: Optional[LinearLayout] = None
+
+        # add/import
+        self._add_overlay: Optional[FrameLayout] = None
+        self._add_content: Optional[LinearLayout] = None
+
+        # post
+        self._post_overlay: Optional[FrameLayout] = None
+        self._post_content: Optional[LinearLayout] = None
+
+        # image
+        self._img_overlay: Optional[FrameLayout] = None
+        self._img_content: Optional[LinearLayout] = None
+
+        self._mode: str = "feed"
+        self._refresh_lock = threading.Lock()
+
+        self._img_cache: Dict[str, Any] = {}
+        self._img_cache_lock = threading.Lock()
+
+        self._refreshing = False
+        self._pull_armed = False
+        self._pull_start_y = 0.0
+
+        self._main_scroll: Optional[ScrollView] = None
+        self._refresh_bar: Optional[View] = None
+
+    # ---- UI rounding ----
+    def _corner_radius_px(self) -> int:
+        return _dp(float(CORNER_RADIUS_DP))
+
+    def _bg_rounded(self, fill_hex: str, stroke_hex: str = "#00000000", stroke_dp: float = 0.0):
+        bg = GradientDrawable()
+        bg.setColor(_c(fill_hex, "#FF1E1E24"))
+        bg.setCornerRadius(float(self._corner_radius_px()))
+        if stroke_dp and stroke_dp > 0:
+            bg.setStroke(_dp(stroke_dp), _c(stroke_hex, "#00000000"))
+        return bg
+
+    def _apply_rounded_clip(self, v: View):
+        try:
+            v.setClipToOutline(True)
+            v.setOutlineProvider(ViewOutlineProvider.BACKGROUND)
+        except Exception:
+            pass
+
+    # ---------- lifecycle ----------
+    def on_plugin_load(self):
+        self._install_drawer_item()
+
+
+    def on_plugin_unload(self):
+        run_on_ui_thread(lambda: self._close(animated=False))
+        run_on_ui_thread(lambda: self._close_add_feed_screen(animated=False))
+        run_on_ui_thread(lambda: self._close_post_screen(animated=False))
+        run_on_ui_thread(lambda: self._close_image_screen(animated=False))
+
+    # ---------- settings ----------
+    def _clear_cache(self):
+        try:
+            self.set_setting("rss_cache", "[]")
+            self.set_setting("rss_cache_ts", "0")
+        except Exception as e:
+            log(f"[RSS] clear cache error: {e}")
+        # если лента открыта — перерисуем
+        try:
+            run_on_ui_thread(self._render)
+        except Exception:
+            pass
+    def create_settings(self):
+        return [
+            Header(text="RSS Моя лента"),
+            Text(
+                text="Открыть ленту",
+                icon="msg_list",
+                accent=True,
+                on_click=lambda v: self._open(get_last_fragment()),
+            ),
+            Text(
+                text="Очистить кэш",
+                icon="msg_delete",
+                accent=False,
+                on_click=lambda v: self._clear_cache(),
+            ),
+            Divider(),
+            Switch(
+                key="auto_refresh",
+                text="Автообновление при открытии",
+                default=True,
+                icon="msg_autodelete",
+            ),
+        ]
+
+    # ---------- drawer ----------
+    def _install_drawer_item(self):
+        try:
+            item = MenuItemData(
+                menu_type=MenuItemType.DRAWER_MENU,
+                text="Моя лента",
+                on_click=lambda ctx: self._open(ctx.get("fragment") or get_last_fragment()),
+                icon="msg_list",
+                item_id="rss_my_feed_drawer",
+                subtext="RSS/Atom + Telegram",
+                priority=980,
+            )
+            self.add_menu_item(item)
+        except Exception as e:
+            log(f"[RSS] Drawer item error: {e}")
+
+    # ---------- storage ----------
+    def _get_subs(self) -> List[str]:
+        raw = self.get_setting("rss_subs", "[]")
+        subs = _safe_json_load(raw, [])
+        if not isinstance(subs, list):
+            return []
+        out = []
+        for s in subs:
+            u = _norm_sub(str(s))
+            if u:
+                out.append(u)
+        return _uniq_keep_order(out)
+
+    def _set_subs(self, subs: List[str]):
+        try:
+            subs2 = []
+            for u in subs:
+                nu = _norm_sub(str(u))
+                if nu:
+                    subs2.append(nu)
+            subs2 = _uniq_keep_order(subs2)
+            self.set_setting("rss_subs", json.dumps(subs2, ensure_ascii=False))
+        except Exception as e:
+            log(f"[RSS] _set_subs error: {e}")
+
+    def _get_cache(self) -> List[Dict[str, Any]]:
+        raw = self.get_setting("rss_cache", "[]")
+        arr = _safe_json_load(raw, [])
+        if not isinstance(arr, list):
+            return []
+        out: List[Dict[str, Any]] = []
+        for it in arr:
+            if not isinstance(it, dict):
+                continue
+            link = str(it.get("link", "") or "")
+            # ✅ title теперь может быть пустым (для TG-only-media)
+            title = str(it.get("title", "") or "")
+            if link:
+                out.append({
+                    "source_handle": str(it.get("source_handle", "") or ""),
+                    "source_title": str(it.get("source_title", "") or ""),
+                    "title": title,
+                    "link": link,
+                    "published_raw": str(it.get("published_raw", "") or ""),
+                    "ts": int(it.get("ts", 0) or 0),
+                    "fetched_ts": int(it.get("fetched_ts", 0) or 0),
+                    "sort_ts": int(it.get("sort_ts", 0) or 0),
+                    "source": str(it.get("source", "") or ""),
+                    "text": str(it.get("text", "") or ""),
+                    "image": str(it.get("image", "") or ""),
+                    "reply": str(it.get("reply", "") or ""),
+                    "doc": str(it.get("doc", "") or ""),
+                    "tg_post_id": str(it.get("tg_post_id", "") or ""),
+                })
+        return out
+
+    def _set_cache(self, items: List[Dict[str, Any]]):
+        try:
+            self.set_setting("rss_cache", json.dumps(items, ensure_ascii=False))
+            self.set_setting("rss_cache_ts", str(_now_ts()))
+        except Exception as e:
+            log(f"[RSS] _set_cache error: {e}")
+
+    # ---------- refresh ----------
+    def _refresh_now(self):
+        subs = self._get_subs()
+        old = self._get_cache()
+
+        old_by_key = {}
+        for x in old:
+            if not isinstance(x, dict):
+                continue
+            key = str(x.get("tg_post_id") or x.get("link") or "")
+            if key:
+                old_by_key[key] = x
+
+        fetched_now = _now_ts()
+        all_items: List[Dict[str, Any]] = []
+
+        for sub in subs:
+            try:
+                if sub.startswith("tguser:"):
+                    username = sub.split(":", 1)[1].strip()
+                    if not username:
+                        continue
+                    src_title, items = _fetch_tg_user_feed(username)
+                else:
+                    xml = _http_get(sub, timeout_sec=12)
+                    src_title, items = parse_feed(xml, sub)
+
+                for it in items[:250]:
+                    key = str(it.get("tg_post_id") or it.get("link") or "")
+                    it["source"] = it.get("source") or src_title or sub
+                    it["fetched_ts"] = fetched_now
+
+                    # ✅ гарантируем, что поля существуют (иначе в кэш могут не попасть)
+                    it["source_handle"] = str(it.get("source_handle", "") or "")
+                    it["source_title"]  = str(it.get("source_title", "") or it.get("source", "") or "")
+                    it["reply"] = str(it.get("reply", "") or "")
+                    it["doc"] = str(it.get("doc", "") or "")
+                    it["tg_post_id"] = str(it.get("tg_post_id", "") or "")
+
+                    ts = int(it.get("ts", 0) or 0)
+                    if ts > 0:
+                        it["sort_ts"] = ts
+                    else:
+                        prev = old_by_key.get(key) if key else None
+                        prev_sort = int((prev or {}).get("sort_ts", 0) or 0)
+                        it["sort_ts"] = prev_sort if prev_sort > 0 else fetched_now
+
+                all_items.extend(items[:250])
+            except Exception as e:
+                log(f"[RSS] fetch error {sub}: {e}")
+
+        # dedup by link
+        seen = set()
+        uniq = []
+        for it in all_items:
+            key = str(it.get("tg_post_id") or it.get("link") or "")
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            uniq.append(it)
+
+        uniq.sort(key=lambda x: int(x.get("sort_ts", x.get("ts", 0) or 0) or 0), reverse=True)
+        self._set_cache(uniq[:900])
+
+    def _refresh_async(self):
+        def bg():
+            try:
+                with self._refresh_lock:
+                    self._refresh_now()
+            finally:
+                def ui():
+                    # ✅ всегда сбрасываем индикатор
+                    self._refreshing = False
+                    try:
+                        if self._refresh_bar is not None:
+                            self._refresh_bar.setVisibility(View.GONE)
+                    except Exception:
+                        pass
+                    self._render()
+                run_on_ui_thread(ui)
+
+        threading.Thread(target=bg, daemon=True).start()
+
+    # ---------- UI helpers ----------
+    def _reply_bubble(self, ctx, reply_text: str) -> View:
+        row = LinearLayout(ctx)
+        row.setOrientation(LinearLayout.HORIZONTAL)
+        row.setPadding(_dp(10), _dp(8), _dp(10), _dp(8))
+        row.setBackground(self._bg_rounded("#141AFFFFFF"))
+
+        bar = View(ctx)
+        bar.setBackgroundColor(_c("#FFFFF0FF"))
+        row.addView(bar, LinearLayout.LayoutParams(_dp(3), ViewGroup.LayoutParams.MATCH_PARENT))
+
+        tv = TextView(ctx)
+        tv.setText(reply_text)
+        tv.setTextSize(13)
+        tv.setTextColor(_c("#FFFFFFFF"))
+        tv.setAlpha(0.55)
+        tv.setSingleLine(False)
+
+        lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0)
+        lp.leftMargin = _dp(8)
+        row.addView(tv, lp)
+
+        return row
+
+    def _top_button(self, ctx, text: str, cb):
+        b = TextView(ctx)
+        b.setText(text)
+        b.setTextSize(14)
+        b.setTextColor(_c("#FFFFFFFF"))
+        b.setPadding(_dp(12), _dp(8), _dp(12), _dp(8))
+        b.setClickable(True)
+        b.setBackground(self._bg_rounded("#1AFFFFFF"))
+
+        def on_click(v):
+            try:
+                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+            except Exception:
+                pass
+            try:
+                cb()
+            except Exception as e:
+                log(f"[RSS] top button error: {e}")
+
+        b.setOnClickListener(OnClickListener(on_click))
+        return b
+
+    def _primary_button(self, ctx, text: str, cb):
+        b = TextView(ctx)
+        b.setText(text)
+        b.setTextSize(15)
+        b.setGravity(Gravity.CENTER)
+        b.setTextColor(_c("#FFFFFFFF"))
+        b.setPadding(_dp(12), _dp(12), _dp(12), _dp(12))
+        b.setClickable(True)
+        b.setBackground(self._bg_rounded("#22FFFFFF"))
+
+        def on_click(v):
+            try:
+                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+            except Exception:
+                pass
+            try:
+                cb()
+            except Exception as e:
+                log(f"[RSS] primary button error: {e}")
+
+        b.setOnClickListener(OnClickListener(on_click))
+        return b
+
+    def _spacer_h(self, ctx, wdp: int) -> View:
+        v = View(ctx)
+        v.setLayoutParams(LinearLayout.LayoutParams(_dp(wdp), 1))
+        return v
+
+    # ---------- MAIN SCREEN ----------
+    def _open(self, fragment):
+        log("[RSS] _open: start")
+        if self._overlay is not None:
+            log("[RSS] _open: already opened")
+            return
+        if not fragment:
+            fragment = get_last_fragment()
+        if not fragment:
+            log("[RSS] _open: no fragment")
+            return
+        activity = fragment.getParentActivity()
+        if not activity:
+            log("[RSS] _open: no activity")
+            return
+
+        # ✅ сначала создаём overlay
+        overlay = FrameLayout(activity)
+        overlay.setLayoutParams(FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        overlay.setBackgroundColor(_c("#FF0F0F12"))
+        overlay.setClickable(True)
+        overlay.setFocusable(True)
+
+        decor = activity.getWindow().getDecorView()
+        if not isinstance(decor, ViewGroup):
+            log("[RSS] _open: decor is not ViewGroup")
+            return
+
+        try:
+            decor.addView(overlay)
+            log("[RSS] _open: overlay added")
+        except Exception as e:
+            log(f"[RSS] _open: decor.addView failed: {e}")
+            return
+
+        content = LinearLayout(activity)
+        content.setOrientation(LinearLayout.VERTICAL)
+        content.setLayoutParams(FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        content.setPadding(_dp(16), _statusbar_pad() + _dp(10), _dp(16), _dp(14))
+        overlay.addView(content)
+
+        top = LinearLayout(activity)
+        top.setOrientation(LinearLayout.HORIZONTAL)
+        top.setGravity(Gravity.CENTER_VERTICAL)
+        content.addView(top)
+
+        title = TextView(activity)
+        title.setText("Моя лента")
+        title.setTextSize(20)
+        title.setTextColor(_c("#FFFFFFFF"))
+        top.addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
+
+        top.addView(self._top_button(activity, "Лента", lambda: self._set_mode("feed")))
+        top.addView(self._spacer_h(activity, 8))
+        top.addView(self._top_button(activity, "Подписки", lambda: self._set_mode("subs")))
+        top.addView(self._spacer_h(activity, 8))
+        top.addView(self._top_button(activity, "Импорт", lambda: self._open_add_feed_screen(fragment)))
+        top.addView(self._spacer_h(activity, 8))
+        top.addView(self._top_button(activity, "Обновить", lambda: (set_refreshing(True), self._refresh_async())))
+        top.addView(self._spacer_h(activity, 8))
+        top.addView(self._top_button(activity, "Закрыть", lambda: self._close(animated=True)))
+
+        hint = TextView(activity)
+        hint.setText("ExteraRSS By @RoflPlugins")
+        hint.setTextSize(12)
+        hint.setTextColor(_c("#FFFFFFFF"))
+        hint.setAlpha(0.65)
+        hint.setPadding(0, _dp(6), 0, _dp(10))
+        content.addView(hint)
+
+        # --- refresh bar (показывается во время обновления) ---
+        refresh_bar = LinearLayout(activity)
+        refresh_bar.setOrientation(LinearLayout.HORIZONTAL)
+        refresh_bar.setGravity(Gravity.CENTER_VERTICAL)
+        refresh_bar.setPadding(_dp(12), _dp(8), _dp(12), _dp(8))
+        refresh_bar.setBackground(self._bg_rounded("#1AFFFFFF"))
+        refresh_bar.setVisibility(View.GONE)
+
+        pb = ProgressBar(activity)
+        try:
+            pb.setIndeterminate(True)
+        except Exception:
+            pass
+        refresh_bar.addView(pb, LinearLayout.LayoutParams(_dp(18), _dp(18)))
+
+        txt = TextView(activity)
+        txt.setText("Обновление… (потяни вниз сверху)")
+        txt.setTextSize(13)
+        txt.setTextColor(_c("#FFFFFFFF"))
+        txt.setAlpha(0.85)
+        lp_txt = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp_txt.leftMargin = _dp(10)
+        refresh_bar.addView(txt, lp_txt)
+
+        lp_rb = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp_rb.bottomMargin = _dp(10)
+        content.addView(refresh_bar, lp_rb)
+
+        self._refresh_bar = refresh_bar
+
+        sv = ScrollView(activity)
+        sv.setLayoutParams(LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        try:
+            sv.setFillViewport(True)
+        except Exception:
+            pass
+        content.addView(sv)
+
+        list_container = LinearLayout(activity)
+        list_container.setOrientation(LinearLayout.VERTICAL)
+        try:
+            lp_lc = ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            list_container.setLayoutParams(lp_lc)
+        except Exception:
+            pass
+
+        sv.addView(list_container)
+
+        self._main_scroll = sv
+
+        # --- pull-to-refresh без androidx ---
+        def set_refreshing(val: bool):
+            self._refreshing = bool(val)
+            try:
+                if self._refresh_bar is not None:
+                    self._refresh_bar.setVisibility(View.VISIBLE if self._refreshing else View.GONE)
+            except Exception:
+                pass
+
+        def start_refresh_from_pull():
+            if self._refreshing:
+                return
+            set_refreshing(True)
+            self._refresh_async()
+
+        def on_touch(_v, ev):
+            try:
+                # если не в режиме ленты — не мешаем (подписки тоже можно, но пусть будет только feed)
+                # if self._mode != "feed":
+                #     return False
+
+                # не триггерим во время обновления
+                if self._refreshing:
+                    return False
+
+                # важно: тянем только когда ScrollView уже в самом верху
+                at_top = (sv.getScrollY() <= 0)
+
+                act = ev.getAction()
+
+                if act == 0:  # ACTION_DOWN
+                    self._pull_start_y = float(ev.getY())
+                    self._pull_armed = at_top
+                    return False
+
+                if act == 2:  # ACTION_MOVE
+                    if not self._pull_armed:
+                        return False
+                    if not at_top:
+                        self._pull_armed = False
+                        return False
+
+                    dy = float(ev.getY()) - float(self._pull_start_y)
+
+                    # порог "как в браузере": потянул заметно вниз
+                    if dy > float(_dp(90)):
+                        # чтобы не срабатывало 10 раз подряд
+                        self._pull_armed = False
+                        try:
+                            sv.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                        except Exception:
+                            pass
+                        start_refresh_from_pull()
+                        return False
+
+                    return False
+
+                if act in (1, 3):  # ACTION_UP / ACTION_CANCEL
+                    self._pull_armed = False
+                    return False
+
+            except Exception:
+                return False
+
+            return False
+
+        sv.setOnTouchListener(dynamic_proxy(
+            "android.view.View$OnTouchListener",
+            {"onTouch": on_touch}
+        ))
+
+        self._overlay = overlay
+        self._content = content
+        self._list_container = list_container
+        self._mode = "feed"
+
+        self._render()
+
+        
+
+        try:
+            overlay.setAlpha(0.0)
+            content.setTranslationY(float(_dp(16)))
+            overlay.animate().alpha(1.0).setDuration(160).start()
+            anim = content.animate().translationY(0.0).setDuration(220)
+            try:
+                anim.setInterpolator(DecelerateInterpolator())
+            except Exception:
+                pass
+            anim.start()
+        except Exception:
+            pass
+
+
+        if self.get_setting("auto_refresh", True):
+            set_refreshing(True)
+            self._refresh_async()
+        self._render()
+
+    def _close(self, animated: bool):
+        overlay = self._overlay
+        content = self._content
+        if overlay is None:
+            return
+
+        def detach():
+            try:
+                parent = overlay.getParent()
+                if parent and isinstance(parent, ViewGroup):
+                    parent.removeView(overlay)
+            except Exception as e:
+                log(f"[RSS] close detach error: {e}")
+            self._overlay = None
+            self._content = None
+            self._list_container = None
+
+        if not animated or content is None:
+            detach()
+            return
+
+        try:
+            overlay.animate().alpha(0.0).setDuration(140).start()
+            content.animate().translationY(float(_dp(16))).setDuration(160).start()
+        except Exception:
+            pass
+        try:
+            AndroidUtilities.runOnUIThread(Runnable(detach), 180)
+        except Exception:
+            run_on_ui_thread(detach)
+
+    def _set_mode(self, mode: str):
+        self._mode = mode
+        self._render()
+
+    # ---------- Add feed screen ----------
+    def _open_add_feed_screen(self, fragment):
+        log("[RSS] _open: start")
+        if self._add_overlay is not None:
+            return
+        if not fragment:
+            fragment = get_last_fragment()
+        if not fragment:
+            return
+        activity = fragment.getParentActivity()
+        if not activity:
+            return
+        decor = activity.getWindow().getDecorView()
+        if not isinstance(decor, ViewGroup):
+            return
+
+        overlay = FrameLayout(activity)
+        overlay.setLayoutParams(FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        overlay.setBackgroundColor(_c("#FF0F0F12"))
+        overlay.setClickable(True)
+        overlay.setFocusable(True)
+
+        content = LinearLayout(activity)
+        content.setOrientation(LinearLayout.VERTICAL)
+        content.setLayoutParams(FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        content.setPadding(_dp(16), _statusbar_pad() + _dp(10), _dp(16), _dp(14))
+        overlay.addView(content)
+
+        top = LinearLayout(activity)
+        top.setOrientation(LinearLayout.HORIZONTAL)
+        top.setGravity(Gravity.CENTER_VERTICAL)
+        content.addView(top)
+
+        back = TextView(activity)
+        back.setText("←")
+        back.setTextSize(20)
+        back.setTextColor(_c("#FFFFFFFF"))
+        back.setPadding(_dp(6), _dp(6), _dp(12), _dp(6))
+        back.setClickable(True)
+        back.setOnClickListener(OnClickListener(lambda v: self._close_add_feed_screen(animated=True)))
+        top.addView(back)
+
+        title = TextView(activity)
+        title.setText("Добавить RSS-ленту")
+        title.setTextSize(20)
+        title.setTextColor(_c("#FFFFFFFF"))
+        top.addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
+
+        top.addView(self._top_button(activity, "Импорт", lambda: None))
+
+        sp = View(activity)
+        sp.setLayoutParams(LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, _dp(18)))
+        content.addView(sp)
+
+        h = TextView(activity)
+        h.setText("Добавить RSS-ленту")
+        h.setTextSize(24)
+        h.setTextColor(_c("#FFFFFFFF"))
+        h.setPadding(0, 0, 0, _dp(18))
+        content.addView(h)
+
+        lbl = TextView(activity)
+        lbl.setText("Адрес RSS (или @username для Telegram)")
+        lbl.setTextSize(13)
+        lbl.setTextColor(_c("#FFFFFFFF"))
+        lbl.setAlpha(0.85)
+        content.addView(lbl)
+
+        url_input = EditText(activity)
+        url_input.setHint("https://site.com/rss  или  @channel")
+        url_input.setSingleLine(True)
+        url_input.setPadding(_dp(12), _dp(12), _dp(12), _dp(12))
+        url_input.setTextColor(_c("#FFFFFFFF"))
+        try:
+            url_input.setHintTextColor(_c("#66FFFFFF"))
+        except Exception:
+            pass
+        url_input.setBackground(self._bg_rounded("#1AFFFFFF"))
+        lp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp.topMargin = _dp(10)
+        content.addView(url_input, lp)
+
+        push = View(activity)
+        push.setLayoutParams(LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1.0))
+        content.addView(push)
+
+        add_btn = self._primary_button(activity, "Добавить", lambda: self._add_sub_from_input(url_input))
+        content.addView(add_btn, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+
+        self._add_overlay = overlay
+        self._add_content = content
+        decor.addView(overlay)
+
+        try:
+            overlay.setAlpha(0.0)
+            content.setTranslationY(float(_dp(16)))
+            overlay.animate().alpha(1.0).setDuration(160).start()
+            anim = content.animate().translationY(0.0).setDuration(220)
+            try:
+                anim.setInterpolator(DecelerateInterpolator())
+            except Exception:
+                pass
+            anim.start()
+        except Exception:
+            pass
+
+    def _add_sub_from_input(self, url_input: EditText):
+        raw = str(url_input.getText().toString()).strip()
+        sub = _norm_sub(raw)
+        if not sub:
+            try:
+                url_input.setBackground(self._bg_rounded("#33FF0000"))
+            except Exception:
+                pass
+            return
+
+        subs = self._get_subs()
+        subs.append(sub)
+        self._set_subs(subs)
+
+        self._refresh_async()
+        self._close_add_feed_screen(animated=True)
+
+        if self._overlay is not None:
+            self._mode = "subs"
+            self._render()
+
+    def _close_add_feed_screen(self, animated: bool):
+        overlay = self._add_overlay
+        content = self._add_content
+        if overlay is None:
+            return
+
+        def detach():
+            try:
+                parent = overlay.getParent()
+                if parent and isinstance(parent, ViewGroup):
+                    parent.removeView(overlay)
+            except Exception:
+                pass
+            self._add_overlay = None
+            self._add_content = None
+
+        if not animated or content is None:
+            detach()
+            return
+
+        try:
+            overlay.animate().alpha(0.0).setDuration(140).start()
+            content.animate().translationY(float(_dp(16))).setDuration(160).start()
+        except Exception:
+            pass
+        try:
+            AndroidUtilities.runOnUIThread(Runnable(detach), 180)
+        except Exception:
+            run_on_ui_thread(detach)
+
+    # ---------- Post screen ----------
+    def _open_post_screen(self, fragment, item: Dict[str, Any]):
+        if self._post_overlay is not None:
+            return
+        if not fragment:
+            fragment = get_last_fragment()
+        if not fragment:
+            return
+        activity = fragment.getParentActivity()
+        if not activity:
+            return
+        decor = activity.getWindow().getDecorView()
+        if not isinstance(decor, ViewGroup):
+            return
+
+        title_raw = item.get("title", "") or ""
+        link = item.get("link", "")
+        src = item.get("source", "")
+        sort_ts = int(item.get("sort_ts", 0) or 0)
+        body_raw = item.get("text", "") or ""
+        img = item.get("image", "") or ""
+
+        title = _strip_tags_and_format(title_raw)
+        body = _strip_tags_and_format(body_raw)
+
+        overlay = FrameLayout(activity)
+        overlay.setLayoutParams(FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        overlay.setBackgroundColor(_c("#FF0F0F12"))
+        overlay.setClickable(True)
+        overlay.setFocusable(True)
+
+        content = LinearLayout(activity)
+        content.setOrientation(LinearLayout.VERTICAL)
+        content.setLayoutParams(FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        content.setPadding(_dp(16), _statusbar_pad() + _dp(10), _dp(16), _dp(14))
+        overlay.addView(content)
+
+        top = LinearLayout(activity)
+        top.setOrientation(LinearLayout.HORIZONTAL)
+        top.setGravity(Gravity.CENTER_VERTICAL)
+        content.addView(top)
+
+        back = TextView(activity)
+        back.setText("←")
+        back.setTextSize(20)
+        back.setTextColor(_c("#FFFFFFFF"))
+        back.setPadding(_dp(6), _dp(6), _dp(12), _dp(6))
+        back.setClickable(True)
+        back.setOnClickListener(OnClickListener(lambda v: self._close_post_screen(animated=True)))
+        top.addView(back)
+
+        t = TextView(activity)
+        t.setText("Пост")
+        t.setTextSize(20)
+        t.setTextColor(_c("#FFFFFFFF"))
+        top.addView(t, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
+
+        go_btn = self._top_button(activity, "Перейти", lambda: self._open_link(get_last_fragment(), link))
+        top.addView(go_btn)
+
+        sv = ScrollView(activity)
+        sv.setLayoutParams(LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        
+
+        col = LinearLayout(activity)
+        col.setOrientation(LinearLayout.VERTICAL)
+        sv.addView(col)
+        
+        # ✅ если title пустой — не показываем
+        if title:
+            tv_title = TextView(activity)
+            tv_title.setText(title)
+            tv_title.setTextSize(22)
+            tv_title.setTextColor(_c("#FFFFFFFF"))
+            tv_title.setPadding(0, _dp(10), 0, _dp(10))
+            col.addView(tv_title)
+        else:
+            spacer = View(activity)
+            spacer.setLayoutParams(LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, _dp(8)))
+            col.addView(spacer)
+
+        meta = []
+        if src:
+            meta.append(src)
+        dt = _format_ru_datetime(sort_ts)
+        if dt:
+            meta.append(dt)
+        meta_line = " • ".join(meta).strip()
+        if meta_line:
+            tv_meta = TextView(activity)
+            tv_meta.setText(meta_line)
+            tv_meta.setTextSize(12)
+            tv_meta.setTextColor(_c("#FFFFFFFF"))
+            tv_meta.setAlpha(0.65)
+            tv_meta.setPadding(0, 0, 0, _dp(12))
+            col.addView(tv_meta)
+
+        reply_raw = str(item.get("reply", "") or "").strip()
+        reply = _clean_reply_for_ui(reply_raw, item)
+        if reply:
+            src_line = _format_source_line(item)
+            shown = f"{src_line}:\n↩ " + reply if src_line else f"↩ {reply}"
+
+            chip = self._reply_bubble(activity, shown)  # ✅ создаём bubble
+
+            lp = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            lp.bottomMargin = _dp(12)
+            col.addView(chip, lp)
+
+        if img:
+            iv = ImageView(activity)
+            iv.setVisibility(View.GONE)
+            iv.setAdjustViewBounds(True)
+            try:
+                iv.setScaleType(ImageView.ScaleType.CENTER_CROP)
+            except Exception:
+                pass
+            iv.setBackground(self._bg_rounded("#00000000"))
+            self._apply_rounded_clip(iv)
+
+            iv.setClickable(True)
+            u = img
+            iv.setOnClickListener(OnClickListener(lambda _v: self._open_image_screen(get_last_fragment(), u)))
+
+            ilp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            ilp.bottomMargin = _dp(12)
+            col.addView(iv, ilp)
+            self._load_image_into(img, iv)
+
+        if body:
+            tv_body = TextView(activity)
+            tv_body.setText(body)
+            tv_body.setTextSize(15)
+            tv_body.setTextColor(_c("#FFFFFFFF"))
+            tv_body.setAlpha(0.88)
+            tv_body.setPadding(0, 0, 0, _dp(16))
+            col.addView(tv_body)
+
+        bottom_go = self._primary_button(activity, "Перейти", lambda: self._open_link(get_last_fragment(), link))
+        col.addView(bottom_go, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+
+        self._post_overlay = overlay
+        self._post_content = content
+        decor.addView(overlay)
+        content.addView(sv)
+
+        try:
+            overlay.setAlpha(0.0)
+            content.setTranslationY(float(_dp(16)))
+            overlay.animate().alpha(1.0).setDuration(160).start()
+            anim = content.animate().translationY(0.0).setDuration(220)
+            try:
+                anim.setInterpolator(DecelerateInterpolator())
+            except Exception:
+                pass
+            anim.start()
+        except Exception:
+            pass
+
+    def _close_post_screen(self, animated: bool):
+        overlay = self._post_overlay
+        content = self._post_content
+        if overlay is None:
+            return
+
+        def detach():
+            try:
+                parent = overlay.getParent()
+                if parent and isinstance(parent, ViewGroup):
+                    parent.removeView(overlay)
+            except Exception:
+                pass
+            self._post_overlay = None
+            self._post_content = None
+
+        if not animated or content is None:
+            detach()
+            return
+
+        try:
+            overlay.animate().alpha(0.0).setDuration(140).start()
+            content.animate().translationY(float(_dp(16))).setDuration(160).start()
+        except Exception:
+            pass
+        try:
+            AndroidUtilities.runOnUIThread(Runnable(detach), 180)
+        except Exception:
+            run_on_ui_thread(detach)
+
+    # ---------- Image fullscreen screen ----------
+    def _open_image_screen(self, fragment, url: str):
+        if not url:
+            return
+        if self._img_overlay is not None:
+            return
+        if not fragment:
+            fragment = get_last_fragment()
+        if not fragment:
+            return
+        activity = fragment.getParentActivity()
+        if not activity:
+            return
+        decor = activity.getWindow().getDecorView()
+        if not isinstance(decor, ViewGroup):
+            return
+
+        overlay = FrameLayout(activity)
+        overlay.setLayoutParams(FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        overlay.setBackgroundColor(_c("#FF0F0F12"))
+        overlay.setClickable(True)
+        overlay.setFocusable(True)
+
+        content = LinearLayout(activity)
+        content.setOrientation(LinearLayout.VERTICAL)
+        content.setLayoutParams(FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        content.setPadding(_dp(16), _statusbar_pad() + _dp(10), _dp(16), _dp(14))
+        overlay.addView(content)
+
+        top = LinearLayout(activity)
+        top.setOrientation(LinearLayout.HORIZONTAL)
+        top.setGravity(Gravity.CENTER_VERTICAL)
+        content.addView(top)
+
+        back = TextView(activity)
+        back.setText("←")
+        back.setTextSize(20)
+        back.setTextColor(_c("#FFFFFFFF"))
+        back.setPadding(_dp(6), _dp(6), _dp(12), _dp(6))
+        back.setClickable(True)
+        back.setOnClickListener(OnClickListener(lambda v: self._close_image_screen(animated=True)))
+        top.addView(back)
+
+        t = TextView(activity)
+        t.setText("Изображение")
+        t.setTextSize(20)
+        t.setTextColor(_c("#FFFFFFFF"))
+        top.addView(t, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
+
+        open_btn = self._top_button(activity, "Открыть", lambda: self._open_link(get_last_fragment(), url))
+        top.addView(open_btn)
+
+        sv = ScrollView(activity)
+        sv.setLayoutParams(LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        content.addView(sv)
+
+        col = LinearLayout(activity)
+        col.setOrientation(LinearLayout.VERTICAL)
+        sv.addView(col)
+
+        iv = ImageView(activity)
+        iv.setVisibility(View.GONE)
+        iv.setAdjustViewBounds(True)
+        try:
+            iv.setScaleType(ImageView.ScaleType.FIT_CENTER)
+        except Exception:
+            pass
+        iv.setBackground(self._bg_rounded("#00000000"))
+        self._apply_rounded_clip(iv)
+
+        ilp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        ilp.topMargin = _dp(12)
+        col.addView(iv, ilp)
+
+        self._load_image_into(url, iv)
+
+        self._img_overlay = overlay
+        self._img_content = content
+        decor.addView(overlay)
+
+        try:
+            overlay.setAlpha(0.0)
+            content.setTranslationY(float(_dp(16)))
+            overlay.animate().alpha(1.0).setDuration(160).start()
+            anim = content.animate().translationY(0.0).setDuration(220)
+            try:
+                anim.setInterpolator(DecelerateInterpolator())
+            except Exception:
+                pass
+            anim.start()
+        except Exception:
+            pass
+
+    def _close_image_screen(self, animated: bool):
+        overlay = self._img_overlay
+        content = self._img_content
+        if overlay is None:
+            return
+
+        def detach():
+            try:
+                parent = overlay.getParent()
+                if parent and isinstance(parent, ViewGroup):
+                    parent.removeView(overlay)
+            except Exception:
+                pass
+            self._img_overlay = None
+            self._img_content = None
+
+        if not animated or content is None:
+            detach()
+            return
+
+        try:
+            overlay.animate().alpha(0.0).setDuration(140).start()
+            content.animate().translationY(float(_dp(16))).setDuration(160).start()
+        except Exception:
+            pass
+        try:
+            AndroidUtilities.runOnUIThread(Runnable(detach), 180)
+        except Exception:
+            run_on_ui_thread(detach)
+
+    # ---------- image loading ----------
+    def _load_image_into(self, url: str, iv: ImageView):
+        if not url:
+            return
+
+        with self._img_cache_lock:
+            bmp = self._img_cache.get(url)
+
+        if bmp is not None:
+            try:
+                iv.setImageBitmap(bmp)
+                iv.setVisibility(View.VISIBLE)
+            except Exception:
+                pass
+            return
+
+        def bg():
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "Exteragram-RSS-Plugin/1.4.4"})
+                with urllib.request.urlopen(req, timeout=14) as resp:
+                    data = resp.read()
+                bmp2 = BitmapFactory.decodeByteArray(data, 0, len(data))
+                if bmp2 is None:
+                    return
+
+                with self._img_cache_lock:
+                    if len(self._img_cache) > 80:
+                        self._img_cache.clear()
+                    self._img_cache[url] = bmp2
+
+                def ui():
+                    try:
+                        iv.setImageBitmap(bmp2)
+                        iv.setVisibility(View.VISIBLE)
+                    except Exception:
+                        pass
+                run_on_ui_thread(ui)
+            except Exception:
+                pass
+
+        threading.Thread(target=bg, daemon=True).start()
+
+    # ---------- render ----------
+    def _render(self):
+        if not self._list_container:
+            return
+        ctx = self._list_container.getContext()
+        try:
+            self._list_container.removeAllViews()
+        except Exception:
+            pass
+        
+
+        try:
+            if self._mode == "subs":
+                self._render_subs(ctx)
+            else:
+                self._render_feed(ctx)
+        except Exception as e:
+            log(f"[RSS] render error: {e}")
+            t = TextView(ctx)
+            t.setText("Ошибка отображения ленты (см. log).")
+            t.setTextSize(14)
+            t.setTextColor(_c("#FFFFFFFF"))
+            t.setAlpha(0.75)
+            self._list_container.addView(t)
+
+    def _render_feed(self, ctx):
+        items = self._get_cache()
+        log(f"[RSS] render_feed cache_items={len(items)} mode={self._mode}")
+        if not items:
+            t = TextView(ctx)
+            t.setText("Лента пустая.\nНажми «Импорт» чтобы добавить RSS или @username, затем «Обновить».")
+            t.setTextSize(14)
+            t.setTextColor(_c("#FFFFFFFF"))
+            t.setAlpha(0.75)
+            self._list_container.addView(t)
+            return
+
+        items.sort(key=lambda x: int(x.get("sort_ts", x.get("ts", 0) or 0) or 0), reverse=True)
+        img_h = _dp(90)
+
+        for it in items[:320]:
+            title = _strip_tags_and_format(str(it.get("title", "") or ""))
+            src = _format_source_line(it)
+            sort_ts = int(it.get("sort_ts", 0) or 0)
+            img = str(it.get("image", "") or "")
+            text = str(it.get("text", "") or "")
+            important = ("(!)" in title) or ("(!)" in text)
+
+            block = LinearLayout(ctx)
+            block.setOrientation(LinearLayout.VERTICAL)
+            block.setPadding(_dp(10), _dp(10), _dp(10), _dp(10))
+            block.setClickable(True)
+            block.setOnClickListener(OnClickListener(lambda _v, item=it: self._open_post_screen(get_last_fragment(), item)))
+
+            block.setBackground(self._bg_rounded("#33FFEB3B" if important else "#141AFFFFFF"))
+            lp_block = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            lp_block.bottomMargin = _dp(10)
+            self._list_container.addView(block, lp_block)
+
+            # ✅ если title пустой — не показываем его вообще
+            if title:
+                tv_title = TextView(ctx)
+                tv_title.setText(title)
+                tv_title.setTextSize(16)
+                tv_title.setTextColor(_c("#FFF7E05A" if important else "#FFFFFFFF"))
+                tv_title.setAlpha(0.98)
+                tv_title.setPadding(0, 0, 0, _dp(6))
+                block.addView(tv_title)
+
+            meta = []
+            if src:
+                meta.append(src)
+            dt = _format_ru_datetime(sort_ts)
+            if dt:
+                meta.append(dt)
+            meta_line = " • ".join(meta).strip()
+            if meta_line:
+                tv_meta = TextView(ctx)
+                tv_meta.setText(meta_line)
+                tv_meta.setTextSize(12)
+                tv_meta.setTextColor(_c("#FFFFFFFF"))
+                tv_meta.setAlpha(0.65)
+                tv_meta.setPadding(0, 0, 0, _dp(10))
+                block.addView(tv_meta)
+
+            reply_raw = str(it.get("reply", "") or "").strip()
+            reply_text = _clean_reply_for_ui(reply_raw, it)  # теперь это почти no-op, но ок
+            if reply_text:
+                src_line = _format_source_line(it)
+                shown = f"{src_line}:\n↩ " + reply_text if src_line else f"↩ {reply_text}"
+
+                bubble = self._reply_bubble(ctx, shown)
+                lp = LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
+                lp.bottomMargin = _dp(8)
+                block.addView(bubble, lp)
+
+            prev = _preview_text(text, 170, title)
+            if prev:
+                tv_prev = TextView(ctx)
+                tv_prev.setText(prev)
+                tv_prev.setTextSize(13)
+                tv_prev.setTextColor(_c("#FFFFFFFF"))
+                tv_prev.setAlpha(0.78)
+                tv_prev.setPadding(0, 0, 0, _dp(10))
+                block.addView(tv_prev)
+
+            if img:
+                iv = ImageView(ctx)
+                iv.setVisibility(View.GONE)
+                iv.setAdjustViewBounds(True)
+                try:
+                    iv.setScaleType(ImageView.ScaleType.CENTER_CROP)
+                except Exception:
+                    pass
+
+                iv.setBackground(self._bg_rounded("#00000000"))
+                self._apply_rounded_clip(iv)
+
+                ilp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, _dp(90))
+                ilp.bottomMargin = _dp(2)
+                block.addView(iv, ilp)
+
+                self._load_image_into(img, iv)
+
+    def _render_subs(self, ctx):
+        subs = self._get_subs()
+
+        h = TextView(ctx)
+        h.setText("Подписки")
+        h.setTextSize(18)
+        h.setTextColor(_c("#FFFFFFFF"))
+        h.setPadding(0, _dp(6), 0, _dp(12))
+        self._list_container.addView(h)
+
+        if not subs:
+            t = TextView(ctx)
+            t.setText("Подписок нет.\nНажми «Импорт» и вставь RSS или @username.")
+            t.setTextSize(14)
+            t.setTextColor(_c("#FFFFFFFF"))
+            t.setAlpha(0.75)
+            self._list_container.addView(t)
+            return
+
+        for i, sub in enumerate(subs, start=1):
+            row = LinearLayout(ctx)
+            row.setOrientation(LinearLayout.HORIZONTAL)
+            row.setGravity(Gravity.CENTER_VERTICAL)
+            row.setPadding(0, _dp(10), 0, _dp(10))
+            self._list_container.addView(row)
+
+            show = ("@" + sub.split(":", 1)[1]) if sub.startswith("tguser:") else sub
+
+            tv = TextView(ctx)
+            tv.setText(show)
+            tv.setTextSize(14)
+            tv.setTextColor(_c("#FFFFFFFF"))
+            tv.setAlpha(0.92)
+            row.addView(tv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
+
+            delb = self._top_button(ctx, "—", lambda idx=i: self._remove_sub_by_index(idx))
+            row.addView(self._spacer_h(ctx, 8))
+            row.addView(delb)
+
+            div = View(ctx)
+            div.setLayoutParams(LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, _dp(1)))
+            div.setBackgroundColor(_c("#22FFFFFF", "#22000000"))
+            self._list_container.addView(div)
+
+    def _remove_sub_by_index(self, idx_1based: int):
+        subs = self._get_subs()
+        i = idx_1based - 1
+        if i < 0 or i >= len(subs):
+            return
+        subs.pop(i)
+        self._set_subs(subs)
+        self._render()
+
+    # ---------- open link ----------
+    def _open_link(self, fragment, link: str):
+        if not link:
+            return
+        if not fragment:
+            fragment = get_last_fragment()
+        if not fragment:
+            return
+        activity = fragment.getParentActivity()
+        if not activity:
+            return
+        try:
+            intent = Intent(Intent.ACTION_VIEW, Uri.parse(link))
+            activity.startActivity(intent)
+        except Exception as e:
+            log(f"[RSS] open link error: {e}")
