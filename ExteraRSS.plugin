@@ -2,6 +2,7 @@ import json
 import time
 import threading
 import urllib.request
+import urllib.parse
 import xml.etree.ElementTree as ET
 import re
 from typing import Any, Dict, List, Optional, Tuple
@@ -16,6 +17,10 @@ from org.telegram.messenger import AndroidUtilities
 
 from android.graphics import Color
 from android.graphics import BitmapFactory
+try:
+    from android.graphics import Bitmap
+except Exception:
+    Bitmap = None
 from android.graphics.drawable import GradientDrawable
 from android.view import Gravity, View, ViewGroup, ViewOutlineProvider
 from android.view import HapticFeedbackConstants
@@ -360,6 +365,50 @@ def _norm_category(raw: Any) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s[:42]
 
+def _norm_image_url(raw: Any) -> str:
+    u = str(raw or "").strip()
+    if not u:
+        return ""
+    if u.startswith("//"):
+        u = "https:" + u
+    return u
+
+def _upgrade_image_url(raw: Any) -> str:
+    u = _norm_image_url(raw)
+    if not u:
+        return ""
+    try:
+        p = urllib.parse.urlsplit(u)
+        if not p.query:
+            return u
+        q = urllib.parse.parse_qsl(p.query, keep_blank_values=True)
+        out_q = []
+        for k, v in q:
+            lk = str(k or "").lower()
+            lv = str(v or "").lower()
+            if lk in ("w", "h", "width", "height", "size"):
+                continue
+            if lk == "name" and lv in ("small", "medium"):
+                out_q.append((k, "orig"))
+                continue
+            out_q.append((k, v))
+        new_q = urllib.parse.urlencode(out_q, doseq=True)
+        return urllib.parse.urlunsplit((p.scheme, p.netloc, p.path, new_q, p.fragment))
+    except Exception:
+        return u
+
+def _norm_images_list(raw: Any) -> List[str]:
+    arr = raw if isinstance(raw, list) else [raw]
+    out: List[str] = []
+    seen = set()
+    for x in arr:
+        u = _upgrade_image_url(x)
+        if not u or u in seen:
+            continue
+        seen.add(u)
+        out.append(u)
+    return out
+
 
 # ---------- HTML cleaning ----------
 def _html_unescape_basic(s: str) -> str:
@@ -543,12 +592,17 @@ def _http_get(url: str, timeout_sec: int = 12) -> bytes:
 
 # ---------------- RSS/Atom parsing ----------------
 def _best_image_from_rss_item(it: ET.Element) -> str:
+    arr = _all_images_from_rss_item(it)
+    return arr[0] if arr else ""
+
+def _all_images_from_rss_item(it: ET.Element) -> List[str]:
+    out: List[str] = []
     try:
         for enc in it.findall("enclosure"):
             url = (enc.attrib.get("url") or "").strip()
             typ = (enc.attrib.get("type") or "").strip().lower()
             if url and (typ.startswith("image/") or url.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))):
-                return url
+                out.append(url)
     except Exception:
         pass
 
@@ -559,11 +613,11 @@ def _best_image_from_rss_item(it: ET.Element) -> str:
                 url = (el.attrib.get("url") or el.attrib.get("src") or "").strip()
                 typ = (el.attrib.get("type") or "").strip().lower()
                 if url and (typ.startswith("image/") or url.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))):
-                    return url
+                    out.append(url)
     except Exception:
         pass
 
-    return ""
+    return _norm_images_list(out)
 
 _RE_LEADING_HANDLE = re.compile(r"^\s*@[\w\d_]{3,32}\s*:\s*", re.I)
 
@@ -587,6 +641,11 @@ def _strip_leading_handle_line(s: str) -> str:
     return s
 
 def _best_image_from_atom_entry(e: ET.Element) -> str:
+    arr = _all_images_from_atom_entry(e)
+    return arr[0] if arr else ""
+
+def _all_images_from_atom_entry(e: ET.Element) -> List[str]:
+    out: List[str] = []
     try:
         for l in e.iter():
             if _strip_ns(l.tag).lower() != "link":
@@ -595,7 +654,7 @@ def _best_image_from_atom_entry(e: ET.Element) -> str:
             rel = (l.attrib.get("rel") or "").strip().lower()
             typ = (l.attrib.get("type") or "").strip().lower()
             if href and rel == "enclosure" and (typ.startswith("image/") or href.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))):
-                return href
+                out.append(href)
     except Exception:
         pass
 
@@ -606,11 +665,11 @@ def _best_image_from_atom_entry(e: ET.Element) -> str:
                 url = (el.attrib.get("url") or el.attrib.get("src") or "").strip()
                 typ = (el.attrib.get("type") or "").strip().lower()
                 if url and (typ.startswith("image/") or url.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))):
-                    return url
+                    out.append(url)
     except Exception:
         pass
 
-    return ""
+    return _norm_images_list(out)
 
 
 def parse_feed(xml_bytes: bytes, source_url: str) -> Tuple[str, List[Dict[str, Any]]]:
@@ -663,7 +722,8 @@ def parse_feed(xml_bytes: bytes, source_url: str) -> Tuple[str, List[Dict[str, A
                 except Exception:
                     pass
 
-            img = _best_image_from_rss_item(it)
+            images = _all_images_from_rss_item(it)
+            img = images[0] if images else ""
             ts = _parse_published_to_ts(pub_raw)
 
             if link:
@@ -675,6 +735,7 @@ def parse_feed(xml_bytes: bytes, source_url: str) -> Tuple[str, List[Dict[str, A
                     "source": src_title,
                     "text": desc,
                     "image": img,
+                    "images": images,
                 })
 
         return (src_title, items)
@@ -702,7 +763,8 @@ def parse_feed(xml_bytes: bytes, source_url: str) -> Tuple[str, List[Dict[str, A
                     break
 
             desc = _join_text(e.find(q("summary"))) or _join_text(e.find(q("content")))
-            img = _best_image_from_atom_entry(e)
+            images = _all_images_from_atom_entry(e)
+            img = images[0] if images else ""
             ts = _parse_published_to_ts(pub_raw)
 
             if link:
@@ -714,6 +776,7 @@ def parse_feed(xml_bytes: bytes, source_url: str) -> Tuple[str, List[Dict[str, A
                     "source": src_title,
                     "text": desc,
                     "image": img,
+                    "images": images,
                 })
 
         return (src_title, items)
@@ -960,29 +1023,28 @@ def _extract_tg_voice_label(block_html: str) -> str:
 
     return ""
 
+def _all_tg_media_urls(block_html: str) -> List[str]:
+    urls: List[str] = []
+    try:
+        for m in _RE_TG_PHOTO_STYLE.finditer(block_html or ""):
+            urls.append((m.group(1) or "").strip())
+    except Exception:
+        pass
+    try:
+        for m in _RE_TG_VIDEO_STYLE.finditer(block_html or ""):
+            urls.append((m.group(1) or "").strip())
+    except Exception:
+        pass
+    try:
+        for m in _RE_TG_STICKER_IMG.finditer(block_html or ""):
+            urls.append((m.group(1) or "").strip())
+    except Exception:
+        pass
+    return _norm_images_list(urls)
+
 def _best_tg_media_url(block_html: str) -> str:
-    m = _RE_TG_PHOTO_STYLE.search(block_html)
-    if m:
-        u = (m.group(1) or "").strip()
-        if u.startswith("//"):
-            u = "https:" + u
-        return u
-
-    m = _RE_TG_VIDEO_STYLE.search(block_html)
-    if m:
-        u = (m.group(1) or "").strip()
-        if u.startswith("//"):
-            u = "https:" + u
-        return u
-
-    m = _RE_TG_STICKER_IMG.search(block_html)
-    if m:
-        u = (m.group(1) or "").strip()
-        if u.startswith("//"):
-            u = "https:" + u
-        return u
-
-    return ""
+    arr = _all_tg_media_urls(block_html)
+    return arr[0] if arr else ""
 
 
 def _extract_tg_text(block_html: str) -> str:
@@ -1073,7 +1135,8 @@ def _parse_tg_preview_page(html: str, username: str, channel_title: str) -> Tupl
             else:
                 title = ""
 
-            img = _best_tg_media_url(b)
+            images = _all_tg_media_urls(b)
+            img = images[0] if images else ""
 
             items.append({
                 "source": src_title,          # что показываем в ленте
@@ -1086,6 +1149,7 @@ def _parse_tg_preview_page(html: str, username: str, channel_title: str) -> Tupl
                 "ts": ts,
                 "text": text,
                 "image": img,
+                "images": images,
                 "reply": reply,
                 "doc": doc_name,
                 "voice": voice_label,
@@ -1215,10 +1279,13 @@ class Plugin(BasePlugin):
         self._nav_feed_btn: Optional[TextView] = None
         self._nav_subs_btn: Optional[TextView] = None
         self._nav_cats_btn: Optional[TextView] = None
+        self._bottom_nav_row: Optional[LinearLayout] = None
+        self._bottom_nav_indicator: Optional[View] = None
 
         self._gesture_start_x = 0.0
         self._gesture_start_y = 0.0
         self._gesture_switched = False
+        self._gesture_dragging = False
         self._animate_list_once = False
         self._feed_item_touch_listener = None
 
@@ -1387,6 +1454,11 @@ class Plugin(BasePlugin):
             # ✅ title теперь может быть пустым (для TG-only-media)
             title = str(it.get("title", "") or "")
             if link:
+                images = _norm_images_list(it.get("images", []))
+                if not images:
+                    one = _upgrade_image_url(it.get("image", ""))
+                    if one:
+                        images = [one]
                 out.append({
                     "source_handle": str(it.get("source_handle", "") or ""),
                     "source_title": str(it.get("source_title", "") or ""),
@@ -1398,7 +1470,8 @@ class Plugin(BasePlugin):
                     "sort_ts": int(it.get("sort_ts", 0) or 0),
                     "source": str(it.get("source", "") or ""),
                     "text": str(it.get("text", "") or ""),
-                    "image": str(it.get("image", "") or ""),
+                    "image": (images[0] if images else ""),
+                    "images": images,
                     "reply": str(it.get("reply", "") or ""),
                     "doc": str(it.get("doc", "") or ""),
                     "voice": str(it.get("voice", "") or ""),
@@ -1519,6 +1592,7 @@ class Plugin(BasePlugin):
         opts = self._category_filter_options()
         self._category_filter = val if val in opts else ""
         self._update_source_button()
+        self._animate_list_once = True
         self._render()
 
     def _open_top_filter_picker(self):
@@ -1714,6 +1788,12 @@ class Plugin(BasePlugin):
                     it["doc"] = str(it.get("doc", "") or "")
                     it["voice"] = str(it.get("voice", "") or "")
                     it["tg_post_id"] = str(it.get("tg_post_id", "") or "")
+                    imgs = _norm_images_list(it.get("images", []))
+                    one_img = _upgrade_image_url(it.get("image", ""))
+                    if one_img and one_img not in imgs:
+                        imgs.insert(0, one_img)
+                    it["images"] = imgs
+                    it["image"] = imgs[0] if imgs else one_img
                     prev = old_by_key.get(key) if key else None
                     prev_cat = _norm_category((prev or {}).get("category") or "")
                     it["category"] = sub_cat if sub_cat else prev_cat
@@ -1888,6 +1968,79 @@ class Plugin(BasePlugin):
             pass
         self._set_mode(order[nxt])
 
+    def _preview_page_swipe(self, dx: float):
+        try:
+            cont = self._list_container
+            if cont is not None:
+                shift = max(-float(_dp(90)), min(float(_dp(90)), float(dx) * 0.55))
+                cont.setTranslationX(shift)
+        except Exception:
+            pass
+        try:
+            row = self._bottom_nav_row
+            ind = self._bottom_nav_indicator
+            if row is None or ind is None:
+                return
+            w = int(row.getWidth() or 0)
+            total = len(self._mode_order())
+            if w <= 0 or total <= 0:
+                return
+            seg = float(w) / float(total)
+            base = float(self._mode_index(self._mode)) * seg
+            target = max(0.0, min(seg * float(total - 1), base + float(-dx) * 0.35))
+            ind.setTranslationX(target)
+        except Exception:
+            pass
+
+    def _finish_page_swipe_preview(self):
+        try:
+            if self._list_container is not None:
+                self._list_container.animate().translationX(0.0).setDuration(140).start()
+        except Exception:
+            pass
+        try:
+            self._update_bottom_nav_indicator(animated=True)
+        except Exception:
+            pass
+
+    def _update_bottom_nav_indicator(self, animated: bool):
+        row = self._bottom_nav_row
+        ind = self._bottom_nav_indicator
+        if row is None or ind is None:
+            return
+        idx = self._mode_index(self._mode)
+        total = len(self._mode_order())
+
+        def apply():
+            try:
+                w = int(row.getWidth() or 0)
+                if w <= 0 or total <= 0:
+                    return
+                seg = max(1, int(w / total))
+                lp = ind.getLayoutParams()
+                if lp is not None:
+                    try:
+                        if int(lp.width or 0) != seg:
+                            lp.width = seg
+                            ind.setLayoutParams(lp)
+                    except Exception:
+                        pass
+                tx = float(seg * idx)
+                if animated:
+                    ind.animate().translationX(tx).setDuration(170).start()
+                else:
+                    ind.setTranslationX(tx)
+            except Exception:
+                pass
+
+        try:
+            row.post(Runnable(apply))
+        except Exception:
+            try:
+                AndroidUtilities.runOnUIThread(Runnable(apply), 0)
+            except Exception:
+                pass
+
     def _handle_item_swipe_touch(self, ev) -> bool:
         try:
             try:
@@ -1899,20 +2052,29 @@ class Plugin(BasePlugin):
                 self._gesture_start_x = float(ev.getX())
                 self._gesture_start_y = float(ev.getY())
                 self._gesture_switched = False
+                self._gesture_dragging = False
                 return False
 
             if act == MotionEvent.ACTION_MOVE:
                 dx = float(ev.getX()) - float(self._gesture_start_x)
                 dy = float(ev.getY()) - float(self._gesture_start_y)
+                if (not self._gesture_dragging) and (abs(dx) > float(_dp(14))) and (abs(dx) > abs(dy) * 1.05):
+                    self._gesture_dragging = True
+                if self._gesture_dragging and (not self._gesture_switched):
+                    self._preview_page_swipe(dx)
                 if (not self._gesture_switched) and (abs(dx) > float(_dp(72))) and (abs(dx) > abs(dy) * 1.2):
                     self._gesture_switched = True
                     self._switch_mode_by_swipe(dx)
+                    self._finish_page_swipe_preview()
                     return True
-                return bool(self._gesture_switched)
+                return bool(self._gesture_switched or self._gesture_dragging)
 
             if act in (MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL):
-                consumed = bool(self._gesture_switched)
+                consumed = bool(self._gesture_switched or self._gesture_dragging)
+                if not self._gesture_switched:
+                    self._finish_page_swipe_preview()
                 self._gesture_switched = False
+                self._gesture_dragging = False
                 return consumed
         except Exception:
             return False
@@ -1926,13 +2088,14 @@ class Plugin(BasePlugin):
             is_subs = (self._mode == "subs")
             is_cats = (self._mode == "cats")
 
-            self._nav_feed_btn.setBackground(self._bg_pill("#2AFFFFFF" if is_feed else "#00000000"))
-            self._nav_subs_btn.setBackground(self._bg_pill("#2AFFFFFF" if is_subs else "#00000000"))
-            self._nav_cats_btn.setBackground(self._bg_pill("#2AFFFFFF" if is_cats else "#00000000"))
+            self._nav_feed_btn.setBackground(self._bg_pill("#00000000"))
+            self._nav_subs_btn.setBackground(self._bg_pill("#00000000"))
+            self._nav_cats_btn.setBackground(self._bg_pill("#00000000"))
 
             self._nav_feed_btn.setAlpha(1.0 if is_feed else 0.78)
             self._nav_subs_btn.setAlpha(1.0 if is_subs else 0.78)
             self._nav_cats_btn.setAlpha(1.0 if is_cats else 0.78)
+            self._update_bottom_nav_indicator(animated=True)
         except Exception:
             pass
 
@@ -2086,14 +2249,25 @@ class Plugin(BasePlugin):
 
         sv.addView(list_container)
 
-        bottom_nav = LinearLayout(activity)
-        bottom_nav.setOrientation(LinearLayout.HORIZONTAL)
-        bottom_nav.setGravity(Gravity.CENTER_VERTICAL)
+        bottom_nav = FrameLayout(activity)
         bottom_nav.setPadding(_dp(4), _dp(4), _dp(4), _dp(4))
         bottom_nav.setBackground(self._bg_pill("#1C1AFFFFFF", "#24FFFFFF", 1.0))
         lp_nav = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         lp_nav.topMargin = _dp(10)
         content.addView(bottom_nav, lp_nav)
+
+        nav_indicator = View(activity)
+        nav_indicator.setBackground(self._bg_pill("#16FFFFFF", "#66FFFFFF", 1.0))
+        bottom_nav.addView(nav_indicator, FrameLayout.LayoutParams(
+            1, ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+
+        nav_row = LinearLayout(activity)
+        nav_row.setOrientation(LinearLayout.HORIZONTAL)
+        nav_row.setGravity(Gravity.CENTER_VERTICAL)
+        bottom_nav.addView(nav_row, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
 
         nav_feed = self._bottom_nav_button(activity, "Лента", lambda: self._set_mode("feed"))
         nav_cats = self._bottom_nav_button(activity, "Категории", lambda: self._set_mode("cats"))
@@ -2101,16 +2275,17 @@ class Plugin(BasePlugin):
         self._nav_feed_btn = nav_feed
         self._nav_cats_btn = nav_cats
         self._nav_subs_btn = nav_subs
+        self._bottom_nav_row = nav_row
+        self._bottom_nav_indicator = nav_indicator
 
         lp_feed = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0)
         lp_cats = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0)
-        lp_cats.leftMargin = _dp(6)
         lp_subs = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0)
-        lp_subs.leftMargin = _dp(6)
+        # без отступов — чтобы индикатор точно совпадал с сегментами
 
-        bottom_nav.addView(nav_feed, lp_feed)
-        bottom_nav.addView(nav_cats, lp_cats)
-        bottom_nav.addView(nav_subs, lp_subs)
+        nav_row.addView(nav_feed, lp_feed)
+        nav_row.addView(nav_cats, lp_cats)
+        nav_row.addView(nav_subs, lp_subs)
         try:
             bottom_nav.setAlpha(1.0)
             bottom_nav.setTranslationY(float(_dp(14)))
@@ -2133,6 +2308,7 @@ class Plugin(BasePlugin):
         self._list_container = list_container
         self._mode = "feed"
         self._update_bottom_nav_state()
+        self._update_bottom_nav_indicator(animated=False)
 
         # --- pull-to-refresh без androidx ---
         def start_refresh_from_pull():
@@ -2153,6 +2329,7 @@ class Plugin(BasePlugin):
                     self._gesture_start_x = float(ev.getX())
                     self._gesture_start_y = float(ev.getY())
                     self._gesture_switched = False
+                    self._gesture_dragging = False
                     self._pull_start_y = float(ev.getY())
                     try:
                         at_top = (not bool(sv.canScrollVertically(-1)))
@@ -2165,11 +2342,17 @@ class Plugin(BasePlugin):
                     dx = float(ev.getX()) - float(self._gesture_start_x)
                     dy_total = float(ev.getY()) - float(self._gesture_start_y)
 
+                    if (not self._gesture_dragging) and (abs(dx) > float(_dp(14))) and (abs(dx) > abs(dy_total) * 1.05):
+                        self._gesture_dragging = True
+                    if self._gesture_dragging and (not self._gesture_switched):
+                        self._preview_page_swipe(dx)
+
                     # свайп влево/вправо по ленте -> переключение нижних вкладок
                     if (not self._gesture_switched) and (abs(dx) > float(_dp(72))) and (abs(dx) > abs(dy_total) * 1.2):
                         self._gesture_switched = True
                         self._pull_armed = False
                         self._switch_mode_by_swipe(dx)
+                        self._finish_page_swipe_preview()
                         return True
 
                     if self._mode not in ("feed", "cats"):
@@ -2210,7 +2393,10 @@ class Plugin(BasePlugin):
 
                 if act in (MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL):
                     self._pull_armed = False
+                    if not self._gesture_switched:
+                        self._finish_page_swipe_preview()
                     self._gesture_switched = False
+                    self._gesture_dragging = False
                     return False
 
             except Exception:
@@ -2273,6 +2459,9 @@ class Plugin(BasePlugin):
             self._nav_cats_btn = None
             self._nav_subs_btn = None
             self._gesture_switched = False
+            self._gesture_dragging = False
+            self._bottom_nav_row = None
+            self._bottom_nav_indicator = None
             self._feed_item_touch_listener = None
 
         if not animated or content is None:
@@ -2293,6 +2482,7 @@ class Plugin(BasePlugin):
         if mode == self._mode:
             return
         self._close_source_picker_screen(animated=False)
+        self._finish_page_swipe_preview()
         prev_idx = self._mode_index(self._mode)
         self._mode = mode
         new_idx = self._mode_index(mode)
@@ -2312,9 +2502,9 @@ class Plugin(BasePlugin):
         try:
             container.setAlpha(1.0)
             direction = 1 if new_idx > prev_idx else -1
-            container.setTranslationX(float(direction * _dp(22)))
+            container.setTranslationX(float(direction * _dp(56)))
             container.setTranslationY(0.0)
-            anim_in = container.animate().translationX(0.0).setDuration(190)
+            anim_in = container.animate().translationX(0.0).setDuration(220)
             try:
                 anim_in.setInterpolator(DecelerateInterpolator())
             except Exception:
@@ -2705,7 +2895,11 @@ class Plugin(BasePlugin):
         cat = _norm_category(item.get("category", ""))
         sort_ts = int(item.get("sort_ts", 0) or 0)
         body_raw = item.get("text", "") or ""
-        img = item.get("image", "") or ""
+        images = _norm_images_list(item.get("images", []))
+        if not images:
+            one = _upgrade_image_url(item.get("image", ""))
+            if one:
+                images = [one]
 
         title = _strip_tags_and_format(title_raw)
         body = _strip_tags_and_format(body_raw)
@@ -2808,25 +3002,25 @@ class Plugin(BasePlugin):
             lp.bottomMargin = _dp(12)
             col.addView(chip, lp)
 
-        if img:
+        for img_idx, img_url in enumerate(images):
             iv = ImageView(activity)
             iv.setVisibility(View.GONE)
             iv.setAdjustViewBounds(True)
             try:
-                iv.setScaleType(ImageView.ScaleType.CENTER_CROP)
+                iv.setScaleType(ImageView.ScaleType.FIT_CENTER)
             except Exception:
                 pass
             iv.setBackground(self._bg_rounded("#00000000"))
             self._apply_rounded_clip(iv)
 
             iv.setClickable(True)
-            u = img
-            iv.setOnClickListener(OnClickListener(lambda _v: self._open_image_screen(get_last_fragment(), u)))
+            u = img_url
+            iv.setOnClickListener(OnClickListener(lambda _v, uu=u: self._open_image_screen(get_last_fragment(), uu)))
 
             ilp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            ilp.bottomMargin = _dp(12)
+            ilp.bottomMargin = _dp(8 if img_idx < len(images) - 1 else 12)
             col.addView(iv, ilp)
-            self._load_image_into(img, iv)
+            self._load_image_into(img_url, iv)
 
         if body:
             tv_body = TextView(activity)
@@ -3028,6 +3222,7 @@ class Plugin(BasePlugin):
 
     # ---------- image loading ----------
     def _load_image_into(self, url: str, iv: ImageView):
+        url = _upgrade_image_url(url)
         if not url:
             return
 
@@ -3047,7 +3242,17 @@ class Plugin(BasePlugin):
                 req = urllib.request.Request(url, headers={"User-Agent": "Exteragram-RSS-Plugin/1.4.4"})
                 with urllib.request.urlopen(req, timeout=14) as resp:
                     data = resp.read()
-                bmp2 = BitmapFactory.decodeByteArray(data, 0, len(data))
+                bmp2 = None
+                try:
+                    if Bitmap is not None:
+                        opts = BitmapFactory.Options()
+                        opts.inPreferredConfig = Bitmap.Config.ARGB_8888
+                        opts.inScaled = False
+                        bmp2 = BitmapFactory.decodeByteArray(data, 0, len(data), opts)
+                except Exception:
+                    bmp2 = None
+                if bmp2 is None:
+                    bmp2 = BitmapFactory.decodeByteArray(data, 0, len(data))
                 if bmp2 is None:
                     return
 
@@ -3169,7 +3374,12 @@ class Plugin(BasePlugin):
             src = _format_source_line(it)
             cat = _norm_category(it.get("category", ""))
             sort_ts = int(it.get("sort_ts", 0) or 0)
-            img = str(it.get("image", "") or "")
+            images = _norm_images_list(it.get("images", []))
+            if not images:
+                one = _upgrade_image_url(it.get("image", ""))
+                if one:
+                    images = [one]
+            img = images[0] if images else ""
             text = str(it.get("text", "") or "")
             important = ("(!)" in title) or ("(!)" in text)
 
@@ -3260,6 +3470,14 @@ class Plugin(BasePlugin):
                 block.addView(iv, ilp)
 
                 self._load_image_into(img, iv)
+                if len(images) > 1:
+                    tv_more = TextView(ctx)
+                    tv_more.setText(f"Ещё изображений: {len(images) - 1}")
+                    tv_more.setTextSize(11)
+                    tv_more.setTextColor(_c("#FFFFFFFF"))
+                    tv_more.setAlpha(0.62)
+                    tv_more.setPadding(0, _dp(4), 0, 0)
+                    block.addView(tv_more)
 
     def _render_subs(self, ctx):
         entries = self._get_sub_entries()
