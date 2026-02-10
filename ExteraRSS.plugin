@@ -1153,8 +1153,6 @@ class Plugin(BasePlugin):
         self._nav_feed_btn: Optional[TextView] = None
         self._nav_subs_btn: Optional[TextView] = None
         self._nav_cats_btn: Optional[TextView] = None
-        self._bottom_nav_row: Optional[LinearLayout] = None
-        self._bottom_nav_indicator: Optional[View] = None
 
         self._gesture_start_x = 0.0
         self._gesture_start_y = 0.0
@@ -1823,64 +1821,6 @@ class Plugin(BasePlugin):
             pass
         self._set_mode(order[nxt])
 
-    def _update_bottom_nav_indicator(self, animated: bool = True):
-        row = self._bottom_nav_row
-        indicator = self._bottom_nav_indicator
-        if row is None or indicator is None:
-            return
-        idx = self._mode_index(self._mode)
-        total = len(self._mode_order())
-
-        def apply():
-            try:
-                w = int(row.getWidth() or 0)
-                if w <= 0:
-                    return
-                seg = max(1, int(w / max(total, 1)))
-                lp = indicator.getLayoutParams()
-                if lp is not None:
-                    try:
-                        if int(lp.width or 0) != seg:
-                            lp.width = seg
-                            indicator.setLayoutParams(lp)
-                    except Exception:
-                        pass
-                tx = float(seg * idx)
-                if animated:
-                    indicator.animate().translationX(tx).setDuration(170).start()
-                else:
-                    indicator.setTranslationX(tx)
-            except Exception:
-                pass
-
-        try:
-            row.post(Runnable(apply))
-        except Exception:
-            try:
-                AndroidUtilities.runOnUIThread(Runnable(apply), 0)
-            except Exception:
-                pass
-
-    def _preview_bottom_nav_drag(self, dx: float):
-        row = self._bottom_nav_row
-        indicator = self._bottom_nav_indicator
-        if row is None or indicator is None:
-            return
-        try:
-            w = int(row.getWidth() or 0)
-            total = len(self._mode_order())
-            if w <= 0 or total <= 0:
-                return
-            seg = float(w) / float(total)
-            base = float(self._mode_index(self._mode)) * seg
-            # dx < 0 (свайп влево) -> двигаем индикатор вправо
-            shift = max(-seg, min(seg, float(-dx) * 0.55))
-            target = max(0.0, min(base + shift, seg * float(total - 1)))
-            indicator.animate().cancel()
-            indicator.setTranslationX(target)
-        except Exception:
-            pass
-
     def _update_bottom_nav_state(self):
         try:
             if self._nav_feed_btn is None or self._nav_subs_btn is None or self._nav_cats_btn is None:
@@ -1889,14 +1829,13 @@ class Plugin(BasePlugin):
             is_subs = (self._mode == "subs")
             is_cats = (self._mode == "cats")
 
-            self._nav_feed_btn.setBackground(self._bg_pill("#00000000"))
-            self._nav_subs_btn.setBackground(self._bg_pill("#00000000"))
-            self._nav_cats_btn.setBackground(self._bg_pill("#00000000"))
+            self._nav_feed_btn.setBackground(self._bg_pill("#2AFFFFFF" if is_feed else "#00000000"))
+            self._nav_subs_btn.setBackground(self._bg_pill("#2AFFFFFF" if is_subs else "#00000000"))
+            self._nav_cats_btn.setBackground(self._bg_pill("#2AFFFFFF" if is_cats else "#00000000"))
 
             self._nav_feed_btn.setAlpha(1.0 if is_feed else 0.78)
             self._nav_subs_btn.setAlpha(1.0 if is_subs else 0.78)
             self._nav_cats_btn.setAlpha(1.0 if is_cats else 0.78)
-            self._update_bottom_nav_indicator(animated=True)
         except Exception:
             pass
 
@@ -2050,27 +1989,14 @@ class Plugin(BasePlugin):
 
         sv.addView(list_container)
 
-        bottom_nav = FrameLayout(activity)
+        bottom_nav = LinearLayout(activity)
+        bottom_nav.setOrientation(LinearLayout.HORIZONTAL)
+        bottom_nav.setGravity(Gravity.CENTER_VERTICAL)
         bottom_nav.setPadding(_dp(4), _dp(4), _dp(4), _dp(4))
         bottom_nav.setBackground(self._bg_pill("#1C1AFFFFFF", "#24FFFFFF", 1.0))
         lp_nav = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         lp_nav.topMargin = _dp(10)
         content.addView(bottom_nav, lp_nav)
-
-        nav_indicator = View(activity)
-        nav_indicator.setBackground(self._bg_pill("#2AFFFFFF"))
-        bottom_nav.addView(nav_indicator, FrameLayout.LayoutParams(
-            1,
-            ViewGroup.LayoutParams.MATCH_PARENT
-        ))
-
-        nav_row = LinearLayout(activity)
-        nav_row.setOrientation(LinearLayout.HORIZONTAL)
-        nav_row.setGravity(Gravity.CENTER_VERTICAL)
-        bottom_nav.addView(nav_row, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT
-        ))
 
         nav_feed = self._bottom_nav_button(activity, "Лента", lambda: self._set_mode("feed"))
         nav_cats = self._bottom_nav_button(activity, "Категории", lambda: self._set_mode("cats"))
@@ -2078,8 +2004,6 @@ class Plugin(BasePlugin):
         self._nav_feed_btn = nav_feed
         self._nav_cats_btn = nav_cats
         self._nav_subs_btn = nav_subs
-        self._bottom_nav_row = nav_row
-        self._bottom_nav_indicator = nav_indicator
 
         lp_feed = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0)
         lp_cats = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0)
@@ -2087,9 +2011,9 @@ class Plugin(BasePlugin):
         lp_subs = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0)
         lp_subs.leftMargin = _dp(6)
 
-        nav_row.addView(nav_feed, lp_feed)
-        nav_row.addView(nav_cats, lp_cats)
-        nav_row.addView(nav_subs, lp_subs)
+        bottom_nav.addView(nav_feed, lp_feed)
+        bottom_nav.addView(nav_cats, lp_cats)
+        bottom_nav.addView(nav_subs, lp_subs)
         try:
             bottom_nav.setAlpha(1.0)
             bottom_nav.setTranslationY(float(_dp(14)))
@@ -2144,11 +2068,8 @@ class Plugin(BasePlugin):
                     dx = float(ev.getX()) - float(self._gesture_start_x)
                     dy_total = float(ev.getY()) - float(self._gesture_start_y)
 
-                    if (not self._gesture_switched) and (abs(dx) > abs(dy_total) * 1.05):
-                        self._preview_bottom_nav_drag(dx)
-
                     # свайп влево/вправо по ленте -> переключение нижних вкладок
-                    if (not self._gesture_switched) and (abs(dx) > float(_dp(56))) and (abs(dx) > abs(dy_total) * 1.15):
+                    if (not self._gesture_switched) and (abs(dx) > float(_dp(72))) and (abs(dx) > abs(dy_total) * 1.2):
                         self._gesture_switched = True
                         self._pull_armed = False
                         self._switch_mode_by_swipe(dx)
@@ -2192,8 +2113,6 @@ class Plugin(BasePlugin):
 
                 if act in (MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL):
                     self._pull_armed = False
-                    if not self._gesture_switched:
-                        self._update_bottom_nav_indicator(animated=True)
                     self._gesture_switched = False
                     return False
 
@@ -2257,8 +2176,6 @@ class Plugin(BasePlugin):
             self._nav_feed_btn = None
             self._nav_cats_btn = None
             self._nav_subs_btn = None
-            self._bottom_nav_row = None
-            self._bottom_nav_indicator = None
             self._gesture_switched = False
 
         if not animated or content is None:
