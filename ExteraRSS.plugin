@@ -1,20 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-RSS My Feed — fullscreen UI (как импорт) + экран поста + fullscreen изображения.
-
-Фиксы:
-- tguser: подписки больше не исчезают
-- сортировка строго по времени публикации (fallback на fetched_ts)
-- важные "(!)" — жёлтый оттенок
-- клик по картинке в посте -> fullscreen
-- дата/время RU: DD.MM.YYYY HH:MM (без секунд, без +0000)
-- FIX Unknown color: безопасный Color.parseColor + только валидные #AARRGGBB
-
-Доп.фикс:
-- TG посты "только медиа" (без текста/без caption) -> без подписи вообще
-  (не "(медиа)" и не "(без названия)", в ленте скрываем строку title если пустая)
-"""
-
 import json
 import time
 import threading
@@ -72,16 +55,16 @@ except ImportError:
             return bool(self._fn(v, key_code, event))
 
 
-__id__ = "RssMyFeed"
-__name__ = "RSS Моя лента"
-__description__ = "RSS/Atom + Telegram (@username через t.me/s/) в одной ленте."
-__author__ = "@you"
+__id__ = "ExteraRSS"
+__name__ = "ExteraRSS"
+__description__ = "RSS + Telegram в одной ленте."
+__author__ = "@RoflPlugins"
 __version__ = "1.4.5"
 __icon__ = "msg_list"
 __min_version__ = "11.12.0"
 
 # ---- UI tuning ----
-CORNER_RADIUS_DP = 10  # единое скругление для кнопок/карточек/картинок
+CORNER_RADIUS_DP = 10
 
 
 # ---------------- safe color ----------------
@@ -1573,7 +1556,7 @@ class Plugin(BasePlugin):
         refresh_bar.addView(pb, LinearLayout.LayoutParams(_dp(18), _dp(18)))
 
         txt = TextView(activity)
-        txt.setText("Обновление… (потяни вниз сверху как в браузере)")
+        txt.setText("Обновление… ")
         txt.setTextSize(13)
         txt.setTextColor(_c("#FFFFFFFF"))
         txt.setAlpha(0.85)
