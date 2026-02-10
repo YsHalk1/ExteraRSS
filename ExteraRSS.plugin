@@ -1148,9 +1148,11 @@ class Plugin(BasePlugin):
         self._img_back_listener = None
 
         self._source_filter: str = ""
+        self._category_filter: str = ""
         self._source_btn: Optional[TextView] = None
         self._nav_feed_btn: Optional[TextView] = None
         self._nav_subs_btn: Optional[TextView] = None
+        self._nav_cats_btn: Optional[TextView] = None
 
     # ---- UI rounding ----
     def _corner_radius_px(self) -> int:
@@ -1383,16 +1385,27 @@ class Plugin(BasePlugin):
 
     def _source_filter_label(self) -> str:
         if not self._source_filter:
-            return "Источник: все ▾"
+            return "Выбрать источник ▾"
         name = self._source_filter
         if len(name) > 22:
             name = name[:21].rstrip() + "…"
         return f"Источник: {name} ▾"
 
+    def _category_filter_label(self) -> str:
+        if not self._category_filter:
+            return "Выбрать категорию ▾"
+        name = self._category_filter
+        if len(name) > 22:
+            name = name[:21].rstrip() + "…"
+        return f"Категория: {name} ▾"
+
+    def _top_filter_label(self) -> str:
+        return self._category_filter_label() if self._mode == "cats" else self._source_filter_label()
+
     def _update_source_button(self):
         try:
             if self._source_btn is not None:
-                self._source_btn.setText(self._source_filter_label())
+                self._source_btn.setText(self._top_filter_label())
         except Exception:
             pass
 
@@ -1409,6 +1422,21 @@ class Plugin(BasePlugin):
     def _source_filter_options(self) -> List[str]:
         return [""] + self._available_sources()
 
+    def _available_categories(self) -> List[str]:
+        vals = []
+        for it in self._get_cache():
+            c = _norm_category(it.get("category", ""))
+            if c:
+                vals.append(c)
+        for it in self._get_sub_entries():
+            c = _norm_category(it.get("category", ""))
+            if c:
+                vals.append(c)
+        return _uniq_keep_order(vals)
+
+    def _category_filter_options(self) -> List[str]:
+        return [""] + self._available_categories()
+
     def _set_source_filter(self, source_value: str):
         val = str(source_value or "")
         opts = self._source_filter_options()
@@ -1416,7 +1444,20 @@ class Plugin(BasePlugin):
         self._update_source_button()
         self._render()
 
-    def _open_source_picker_screen(self):
+    def _set_category_filter(self, category_value: str):
+        val = _norm_category(category_value)
+        opts = self._category_filter_options()
+        self._category_filter = val if val in opts else ""
+        self._update_source_button()
+        self._render()
+
+    def _open_top_filter_picker(self):
+        if self._mode == "cats":
+            self._open_category_picker_screen()
+        else:
+            self._open_source_picker_screen()
+
+    def _open_picker_screen(self, picker_title: str, options: List[Tuple[str, str]], current_value: str, on_select):
         if self._src_overlay is not None:
             return
         fragment = get_last_fragment()
@@ -1453,12 +1494,12 @@ class Plugin(BasePlugin):
         lp_card.topMargin = _statusbar_pad() + _dp(14)
         overlay.addView(card, lp_card)
 
-        title = TextView(activity)
-        title.setText("Выбор источника")
-        title.setTextSize(17)
-        title.setTextColor(_c("#FFFFFFFF"))
-        title.setPadding(_dp(2), _dp(2), _dp(2), _dp(10))
-        card.addView(title)
+        title_tv = TextView(activity)
+        title_tv.setText(picker_title)
+        title_tv.setTextSize(17)
+        title_tv.setTextColor(_c("#FFFFFFFF"))
+        title_tv.setPadding(_dp(2), _dp(2), _dp(2), _dp(10))
+        card.addView(title_tv)
 
         sv = ScrollView(activity)
         sv.setLayoutParams(LinearLayout.LayoutParams(
@@ -1471,21 +1512,19 @@ class Plugin(BasePlugin):
         col.setOrientation(LinearLayout.VERTICAL)
         sv.addView(col)
 
-        opts = self._source_filter_options()
-        cur = self._source_filter if self._source_filter in opts else ""
-        for source_name in opts:
-            label = "Все источники" if not source_name else source_name
+        current = str(current_value or "")
+        for value, label in options:
             btn = TextView(activity)
             btn.setText(label)
             btn.setTextSize(14)
             btn.setTextColor(_c("#FFFFFFFF"))
             btn.setPadding(_dp(12), _dp(10), _dp(12), _dp(10))
             btn.setClickable(True)
-            selected = (source_name == cur)
+            selected = (value == current)
             btn.setAlpha(1.0 if selected else 0.9)
             btn.setBackground(self._bg_rounded("#33FFFFFF" if selected else "#121AFFFFFF"))
             btn.setOnClickListener(OnClickListener(
-                lambda _v, val=source_name: (self._set_source_filter(val), self._close_source_picker_screen(animated=True))
+                lambda _v, val=value: (on_select(val), self._close_source_picker_screen(animated=True))
             ))
             lp_btn = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1519,6 +1558,18 @@ class Plugin(BasePlugin):
             anim.start()
         except Exception:
             pass
+
+    def _open_source_picker_screen(self):
+        vals = self._source_filter_options()
+        options = [("", "Все источники")] + [(x, x) for x in vals if x]
+        cur = self._source_filter if self._source_filter in vals else ""
+        self._open_picker_screen("Выбор источника", options, cur, self._set_source_filter)
+
+    def _open_category_picker_screen(self):
+        vals = self._category_filter_options()
+        options = [("", "Все категории")] + [(x, x) for x in vals if x]
+        cur = self._category_filter if self._category_filter in vals else ""
+        self._open_picker_screen("Выбор категории", options, cur, self._set_category_filter)
 
     def _close_source_picker_screen(self, animated: bool):
         overlay = self._src_overlay
@@ -1725,6 +1776,15 @@ class Plugin(BasePlugin):
             except Exception:
                 pass
             try:
+                v.animate().cancel()
+                v.animate().scaleX(0.96).scaleY(0.96).setDuration(70).start()
+                AndroidUtilities.runOnUIThread(
+                    Runnable(lambda: v.animate().scaleX(1.0).scaleY(1.0).setDuration(120).start()),
+                    75
+                )
+            except Exception:
+                pass
+            try:
                 cb()
             except Exception as e:
                 log(f"[RSS] bottom nav button error: {e}")
@@ -1734,13 +1794,43 @@ class Plugin(BasePlugin):
 
     def _update_bottom_nav_state(self):
         try:
-            if self._nav_feed_btn is None or self._nav_subs_btn is None:
+            if self._nav_feed_btn is None or self._nav_subs_btn is None or self._nav_cats_btn is None:
                 return
-            is_feed = (self._mode != "subs")
+            is_feed = (self._mode == "feed")
+            is_subs = (self._mode == "subs")
+            is_cats = (self._mode == "cats")
+
             self._nav_feed_btn.setBackground(self._bg_pill("#2AFFFFFF" if is_feed else "#00000000"))
-            self._nav_subs_btn.setBackground(self._bg_pill("#2AFFFFFF" if not is_feed else "#00000000"))
+            self._nav_subs_btn.setBackground(self._bg_pill("#2AFFFFFF" if is_subs else "#00000000"))
+            self._nav_cats_btn.setBackground(self._bg_pill("#2AFFFFFF" if is_cats else "#00000000"))
+
             self._nav_feed_btn.setAlpha(1.0 if is_feed else 0.78)
-            self._nav_subs_btn.setAlpha(1.0 if not is_feed else 0.78)
+            self._nav_subs_btn.setAlpha(1.0 if is_subs else 0.78)
+            self._nav_cats_btn.setAlpha(1.0 if is_cats else 0.78)
+        except Exception:
+            pass
+
+    def _animate_entry(self, v: View, idx: int = 0):
+        try:
+            delay = int(min(max(idx, 0), 10) * 22)
+            v.setAlpha(0.0)
+            v.setTranslationY(float(_dp(10)))
+
+            def run():
+                try:
+                    anim = v.animate().alpha(1.0).translationY(0.0).setDuration(180)
+                    try:
+                        anim.setInterpolator(DecelerateInterpolator())
+                    except Exception:
+                        pass
+                    anim.start()
+                except Exception:
+                    pass
+
+            if delay > 0:
+                AndroidUtilities.runOnUIThread(Runnable(run), delay)
+            else:
+                run()
         except Exception:
             pass
 
@@ -1803,7 +1893,7 @@ class Plugin(BasePlugin):
         title.setTextColor(_c("#FFFFFFFF"))
         top.addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
 
-        source_btn = self._top_button(activity, self._source_filter_label(), lambda: self._open_source_picker_screen())
+        source_btn = self._top_button(activity, self._top_filter_label(), lambda: self._open_top_filter_picker())
         self._source_btn = source_btn
         top.addView(source_btn)
         top.addView(self._spacer_h(activity, 8))
@@ -1882,16 +1972,30 @@ class Plugin(BasePlugin):
         content.addView(bottom_nav, lp_nav)
 
         nav_feed = self._bottom_nav_button(activity, "Лента", lambda: self._set_mode("feed"))
+        nav_cats = self._bottom_nav_button(activity, "Категории", lambda: self._set_mode("cats"))
         nav_subs = self._bottom_nav_button(activity, "Подписки", lambda: self._set_mode("subs"))
         self._nav_feed_btn = nav_feed
+        self._nav_cats_btn = nav_cats
         self._nav_subs_btn = nav_subs
 
         lp_feed = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0)
+        lp_cats = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0)
+        lp_cats.leftMargin = _dp(6)
         lp_subs = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0)
         lp_subs.leftMargin = _dp(6)
 
         bottom_nav.addView(nav_feed, lp_feed)
+        bottom_nav.addView(nav_cats, lp_cats)
         bottom_nav.addView(nav_subs, lp_subs)
+        try:
+            bottom_nav.setAlpha(0.0)
+            bottom_nav.setTranslationY(float(_dp(14)))
+            AndroidUtilities.runOnUIThread(
+                Runnable(lambda: bottom_nav.animate().alpha(1.0).translationY(0.0).setDuration(220).start()),
+                80
+            )
+        except Exception:
+            pass
 
         self._main_scroll = sv
         self._overlay = overlay
@@ -2017,6 +2121,7 @@ class Plugin(BasePlugin):
             self._main_back_listener = None
             self._source_btn = None
             self._nav_feed_btn = None
+            self._nav_cats_btn = None
             self._nav_subs_btn = None
 
         if not animated or content is None:
@@ -2036,6 +2141,7 @@ class Plugin(BasePlugin):
     def _set_mode(self, mode: str):
         if mode == self._mode:
             return
+        self._close_source_picker_screen(animated=False)
         self._mode = mode
         self._update_source_button()
         self._update_bottom_nav_state()
@@ -2816,8 +2922,10 @@ class Plugin(BasePlugin):
         try:
             if self._mode == "subs":
                 self._render_subs(ctx)
+            elif self._mode == "cats":
+                self._render_feed(ctx, by_category=True)
             else:
-                self._render_feed(ctx)
+                self._render_feed(ctx, by_category=False)
         except Exception as e:
             log(f"[RSS] render error: {e}")
             t = TextView(ctx)
@@ -2827,9 +2935,9 @@ class Plugin(BasePlugin):
             t.setAlpha(0.75)
             self._list_container.addView(t)
 
-    def _render_feed(self, ctx):
+    def _render_feed(self, ctx, by_category: bool = False):
         all_items = self._get_cache()
-        log(f"[RSS] render_feed cache_items={len(all_items)} mode={self._mode}")
+        log(f"[RSS] render_feed cache_items={len(all_items)} mode={self._mode} by_category={by_category}")
 
         if not all_items:
             t = TextView(ctx)
@@ -2841,28 +2949,51 @@ class Plugin(BasePlugin):
             return
 
         items = all_items
-        if self._source_filter:
-            filt = self._source_filter
-            items = []
-            for it in all_items:
-                src_val = _format_source_line(it).strip()
-                if not src_val:
-                    src_val = str(it.get("source", "") or "").strip()
-                if src_val == filt:
-                    items.append(it)
+        if by_category:
+            if self._category_filter:
+                filt = self._category_filter
+                items = []
+                for it in all_items:
+                    if _norm_category(it.get("category", "")) == filt:
+                        items.append(it)
+        else:
+            if self._source_filter:
+                filt = self._source_filter
+                items = []
+                for it in all_items:
+                    src_val = _format_source_line(it).strip()
+                    if not src_val:
+                        src_val = str(it.get("source", "") or "").strip()
+                    if src_val == filt:
+                        items.append(it)
 
         if not items:
             t = TextView(ctx)
-            t.setText("По выбранному источнику пока ничего нет.\nНажми кнопку «Источник», чтобы переключить фильтр на «все».")
+            if by_category:
+                t.setText("По выбранной категории пока ничего нет.\nНажми «Категория», чтобы выбрать другую или «все».")
+            else:
+                t.setText("По выбранному источнику пока ничего нет.\nНажми кнопку «Источник», чтобы переключить фильтр на «все».")
             t.setTextSize(14)
             t.setTextColor(_c("#FFFFFFFF"))
             t.setAlpha(0.75)
             self._list_container.addView(t)
             return
 
+        if by_category:
+            info = TextView(ctx)
+            info.setText(
+                f"Категории: {self._category_filter}" if self._category_filter
+                else "Категории: все"
+            )
+            info.setTextSize(13)
+            info.setTextColor(_c("#FFFFFFFF"))
+            info.setAlpha(0.72)
+            info.setPadding(0, 0, 0, _dp(10))
+            self._list_container.addView(info)
+
         items.sort(key=lambda x: int(x.get("sort_ts", x.get("ts", 0) or 0) or 0), reverse=True)
 
-        for it in items[:320]:
+        for idx, it in enumerate(items[:320]):
             title = _strip_tags_and_format(str(it.get("title", "") or ""))
             src = _format_source_line(it)
             cat = _norm_category(it.get("category", ""))
@@ -2881,6 +3012,7 @@ class Plugin(BasePlugin):
             lp_block = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             lp_block.bottomMargin = _dp(10)
             self._list_container.addView(block, lp_block)
+            self._animate_entry(block, idx)
 
             # ✅ если title пустой — не показываем его вообще
             if title:
@@ -2970,7 +3102,7 @@ class Plugin(BasePlugin):
             t.setAlpha(0.75)
             self._list_container.addView(t)
         else:
-            for it in entries:
+            for idx, it in enumerate(entries):
                 sub = str(it.get("sub") or "")
                 cat = _norm_category(it.get("category", ""))
                 row = LinearLayout(ctx)
@@ -2978,6 +3110,7 @@ class Plugin(BasePlugin):
                 row.setGravity(Gravity.CENTER_VERTICAL)
                 row.setPadding(0, _dp(10), 0, _dp(10))
                 self._list_container.addView(row)
+                self._animate_entry(row, idx)
 
                 show = ("@" + sub.split(":", 1)[1]) if sub.startswith("tguser:") else sub
 
@@ -3017,6 +3150,7 @@ class Plugin(BasePlugin):
         lp_plus.topMargin = _dp(14)
         lp_plus.bottomMargin = _dp(4)
         self._list_container.addView(plus_btn, lp_plus)
+        self._animate_entry(plus_btn, 2)
 
     def _remove_sub(self, sub_key: str):
         if not sub_key:
