@@ -353,6 +353,14 @@ def _norm_sub(line: str) -> Optional[str]:
     return None
 
 
+def _norm_category(raw: Any) -> str:
+    s = str(raw or "").strip()
+    if not s:
+        return ""
+    s = re.sub(r"\s+", " ", s).strip()
+    return s[:42]
+
+
 # ---------- HTML cleaning ----------
 def _html_unescape_basic(s: str) -> str:
     if not s:
@@ -1106,6 +1114,8 @@ class Plugin(BasePlugin):
         # add/import
         self._add_overlay: Optional[FrameLayout] = None
         self._add_content: Optional[LinearLayout] = None
+        self._cat_overlay: Optional[FrameLayout] = None
+        self._cat_content: Optional[LinearLayout] = None
 
         # post
         self._post_overlay: Optional[FrameLayout] = None
@@ -1130,8 +1140,12 @@ class Plugin(BasePlugin):
         self._main_touch_listener = None
         self._main_back_listener = None
         self._add_back_listener = None
+        self._cat_back_listener = None
         self._post_back_listener = None
         self._img_back_listener = None
+
+        self._source_filter: str = ""
+        self._source_btn: Optional[TextView] = None
 
     # ---- UI rounding ----
     def _corner_radius_px(self) -> int:
@@ -1160,6 +1174,7 @@ class Plugin(BasePlugin):
     def on_plugin_unload(self):
         run_on_ui_thread(lambda: self._close(animated=False))
         run_on_ui_thread(lambda: self._close_add_feed_screen(animated=False))
+        run_on_ui_thread(lambda: self._close_category_screen(animated=False))
         run_on_ui_thread(lambda: self._close_post_screen(animated=False))
         run_on_ui_thread(lambda: self._close_image_screen(animated=False))
 
@@ -1216,29 +1231,64 @@ class Plugin(BasePlugin):
             log(f"[RSS] Drawer item error: {e}")
 
     # ---------- storage ----------
-    def _get_subs(self) -> List[str]:
+    def _get_sub_entries(self) -> List[Dict[str, str]]:
         raw = self.get_setting("rss_subs", "[]")
         subs = _safe_json_load(raw, [])
         if not isinstance(subs, list):
             return []
-        out = []
-        for s in subs:
-            u = _norm_sub(str(s))
-            if u:
-                out.append(u)
-        return _uniq_keep_order(out)
+        out: List[Dict[str, str]] = []
+        seen = {}
+        for it in subs:
+            sub = ""
+            cat = ""
+            if isinstance(it, dict):
+                sub = _norm_sub(str(it.get("sub") or it.get("url") or it.get("source") or ""))
+                cat = _norm_category(it.get("category") or it.get("cat") or "")
+            else:
+                sub = _norm_sub(str(it))
+            if not sub:
+                continue
+            if sub in seen:
+                idx = seen[sub]
+                if cat and not out[idx].get("category"):
+                    out[idx]["category"] = cat
+                continue
+            seen[sub] = len(out)
+            out.append({"sub": sub, "category": cat})
+        return out
+
+    def _set_sub_entries(self, entries: List[Dict[str, Any]]):
+        try:
+            out: List[Dict[str, str]] = []
+            seen = set()
+            for it in entries:
+                if not isinstance(it, dict):
+                    continue
+                sub = _norm_sub(str(it.get("sub") or ""))
+                if not sub or sub in seen:
+                    continue
+                seen.add(sub)
+                out.append({
+                    "sub": sub,
+                    "category": _norm_category(it.get("category") or ""),
+                })
+            self.set_setting("rss_subs", json.dumps(out, ensure_ascii=False))
+        except Exception as e:
+            log(f"[RSS] _set_sub_entries error: {e}")
+
+    def _get_subs(self) -> List[str]:
+        return [x.get("sub", "") for x in self._get_sub_entries() if x.get("sub")]
 
     def _set_subs(self, subs: List[str]):
-        try:
-            subs2 = []
-            for u in subs:
-                nu = _norm_sub(str(u))
-                if nu:
-                    subs2.append(nu)
-            subs2 = _uniq_keep_order(subs2)
-            self.set_setting("rss_subs", json.dumps(subs2, ensure_ascii=False))
-        except Exception as e:
-            log(f"[RSS] _set_subs error: {e}")
+        old = self._get_sub_entries()
+        old_cat = {str(x.get("sub")): _norm_category(x.get("category")) for x in old}
+        merged = []
+        for u in subs:
+            nu = _norm_sub(str(u))
+            if not nu:
+                continue
+            merged.append({"sub": nu, "category": old_cat.get(nu, "")})
+        self._set_sub_entries(merged)
 
     def _get_cache(self) -> List[Dict[str, Any]]:
         raw = self.get_setting("rss_cache", "[]")
@@ -1268,6 +1318,7 @@ class Plugin(BasePlugin):
                     "reply": str(it.get("reply", "") or ""),
                     "doc": str(it.get("doc", "") or ""),
                     "tg_post_id": str(it.get("tg_post_id", "") or ""),
+                    "category": _norm_category(it.get("category", "")),
                 })
         return out
 
@@ -1316,8 +1367,43 @@ class Plugin(BasePlugin):
         except Exception:
             pass
 
+    def _source_filter_label(self) -> str:
+        if not self._source_filter:
+            return "Источник: все"
+        name = self._source_filter
+        if len(name) > 22:
+            name = name[:21].rstrip() + "…"
+        return f"Источник: {name}"
+
+    def _update_source_button(self):
+        try:
+            if self._source_btn is not None:
+                self._source_btn.setText(self._source_filter_label())
+        except Exception:
+            pass
+
+    def _available_sources(self) -> List[str]:
+        vals = []
+        for it in self._get_cache():
+            s = _format_source_line(it).strip()
+            if not s:
+                s = str(it.get("source", "") or "").strip()
+            if s:
+                vals.append(s)
+        return _uniq_keep_order(vals)
+
+    def _cycle_source_filter(self):
+        opts = [""] + self._available_sources()
+        if not opts:
+            opts = [""]
+        cur = self._source_filter if self._source_filter in opts else ""
+        idx = opts.index(cur)
+        self._source_filter = opts[(idx + 1) % len(opts)]
+        self._update_source_button()
+        self._render()
+
     def _refresh_now(self):
-        subs = self._get_subs()
+        sub_entries = self._get_sub_entries()
         old = self._get_cache()
 
         old_by_key = {}
@@ -1331,7 +1417,11 @@ class Plugin(BasePlugin):
         fetched_now = _now_ts()
         all_items: List[Dict[str, Any]] = []
 
-        for sub in subs:
+        for sub_item in sub_entries:
+            sub = str(sub_item.get("sub") or "")
+            sub_cat = _norm_category(sub_item.get("category") or "")
+            if not sub:
+                continue
             try:
                 if sub.startswith("tguser:"):
                     username = sub.split(":", 1)[1].strip()
@@ -1353,12 +1443,14 @@ class Plugin(BasePlugin):
                     it["reply"] = str(it.get("reply", "") or "")
                     it["doc"] = str(it.get("doc", "") or "")
                     it["tg_post_id"] = str(it.get("tg_post_id", "") or "")
+                    prev = old_by_key.get(key) if key else None
+                    prev_cat = _norm_category((prev or {}).get("category") or "")
+                    it["category"] = sub_cat if sub_cat else prev_cat
 
                     ts = int(it.get("ts", 0) or 0)
                     if ts > 0:
                         it["sort_ts"] = ts
                     else:
-                        prev = old_by_key.get(key) if key else None
                         prev_sort = int((prev or {}).get("sort_ts", 0) or 0)
                         it["sort_ts"] = prev_sort if prev_sort > 0 else fetched_now
 
@@ -1389,6 +1481,7 @@ class Plugin(BasePlugin):
                     # ✅ всегда сбрасываем индикатор
                     self._set_refreshing_ui(False)
                     self._render()
+                    self._update_source_button()
                 run_on_ui_thread(ui)
 
         threading.Thread(target=bg, daemon=True).start()
@@ -1526,9 +1619,9 @@ class Plugin(BasePlugin):
         title.setTextColor(_c("#FFFFFFFF"))
         top.addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
 
-        top.addView(self._top_button(activity, "Лента", lambda: self._set_mode("feed")))
-        top.addView(self._spacer_h(activity, 8))
-        top.addView(self._top_button(activity, "Подписки", lambda: self._set_mode("subs")))
+        source_btn = self._top_button(activity, self._source_filter_label(), lambda: self._cycle_source_filter())
+        self._source_btn = source_btn
+        top.addView(source_btn)
         top.addView(self._spacer_h(activity, 8))
         top.addView(self._top_button(activity, "Закрыть", lambda: self._close(animated=True)))
 
@@ -1573,7 +1666,8 @@ class Plugin(BasePlugin):
         sv = ScrollView(activity)
         sv.setLayoutParams(LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
-            ViewGroup.LayoutParams.MATCH_PARENT
+            0,
+            1.0
         ))
         try:
             sv.setFillViewport(True)
@@ -1593,6 +1687,23 @@ class Plugin(BasePlugin):
             pass
 
         sv.addView(list_container)
+
+        bottom_nav = LinearLayout(activity)
+        bottom_nav.setOrientation(LinearLayout.HORIZONTAL)
+        bottom_nav.setGravity(Gravity.CENTER_VERTICAL)
+        lp_nav = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp_nav.topMargin = _dp(10)
+        content.addView(bottom_nav, lp_nav)
+
+        nav_feed = self._top_button(activity, "Лента", lambda: self._set_mode("feed"))
+        nav_subs = self._top_button(activity, "Подписки", lambda: self._set_mode("subs"))
+
+        lp_feed = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0)
+        lp_subs = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0)
+        lp_subs.leftMargin = _dp(8)
+
+        bottom_nav.addView(nav_feed, lp_feed)
+        bottom_nav.addView(nav_subs, lp_subs)
 
         self._main_scroll = sv
         self._overlay = overlay
@@ -1714,6 +1825,7 @@ class Plugin(BasePlugin):
             self._list_container = None
             self._main_touch_listener = None
             self._main_back_listener = None
+            self._source_btn = None
 
         if not animated or content is None:
             detach()
@@ -1733,6 +1845,7 @@ class Plugin(BasePlugin):
         if mode == self._mode:
             return
         self._mode = mode
+        self._update_source_button()
         container = self._list_container
         if container is None:
             self._render()
@@ -1840,11 +1953,34 @@ class Plugin(BasePlugin):
         lp.topMargin = _dp(10)
         content.addView(url_input, lp)
 
+        lbl_cat = TextView(activity)
+        lbl_cat.setText("Категория (любая, необязательно)")
+        lbl_cat.setTextSize(13)
+        lbl_cat.setTextColor(_c("#FFFFFFFF"))
+        lbl_cat.setAlpha(0.85)
+        lp_lbl_cat = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp_lbl_cat.topMargin = _dp(12)
+        content.addView(lbl_cat, lp_lbl_cat)
+
+        category_input = EditText(activity)
+        category_input.setHint("например: Новости, Мемы, Работа")
+        category_input.setSingleLine(True)
+        category_input.setPadding(_dp(12), _dp(12), _dp(12), _dp(12))
+        category_input.setTextColor(_c("#FFFFFFFF"))
+        try:
+            category_input.setHintTextColor(_c("#66FFFFFF"))
+        except Exception:
+            pass
+        category_input.setBackground(self._bg_rounded("#1AFFFFFF"))
+        lp_cat = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp_cat.topMargin = _dp(10)
+        content.addView(category_input, lp_cat)
+
         push = View(activity)
         push.setLayoutParams(LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1.0))
         content.addView(push)
 
-        add_btn = self._primary_button(activity, "Добавить", lambda: self._add_sub_from_input(url_input))
+        add_btn = self._primary_button(activity, "Добавить", lambda: self._add_sub_from_input(url_input, category_input))
         content.addView(add_btn, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ))
@@ -1867,7 +2003,7 @@ class Plugin(BasePlugin):
         except Exception:
             pass
 
-    def _add_sub_from_input(self, url_input: EditText):
+    def _add_sub_from_input(self, url_input: EditText, category_input: EditText):
         raw = str(url_input.getText().toString()).strip()
         sub = _norm_sub(raw)
         if not sub:
@@ -1877,9 +2013,17 @@ class Plugin(BasePlugin):
                 pass
             return
 
-        subs = self._get_subs()
-        subs.append(sub)
-        self._set_subs(subs)
+        category = _norm_category(str(category_input.getText().toString()))
+        entries = self._get_sub_entries()
+        updated = False
+        for it in entries:
+            if str(it.get("sub") or "") == sub:
+                it["category"] = category
+                updated = True
+                break
+        if not updated:
+            entries.append({"sub": sub, "category": category})
+        self._set_sub_entries(entries)
 
         self._refresh_async()
         self._close_add_feed_screen(animated=True)
@@ -1919,6 +2063,165 @@ class Plugin(BasePlugin):
         except Exception:
             run_on_ui_thread(detach)
 
+    def _open_category_screen(self, sub_key: str):
+        if self._cat_overlay is not None:
+            return
+        if not sub_key:
+            return
+        fragment = get_last_fragment()
+        if not fragment:
+            return
+        activity = fragment.getParentActivity()
+        if not activity:
+            return
+        decor = activity.getWindow().getDecorView()
+        if not isinstance(decor, ViewGroup):
+            return
+
+        target = None
+        for it in self._get_sub_entries():
+            if str(it.get("sub") or "") == sub_key:
+                target = it
+                break
+        if target is None:
+            return
+
+        overlay = FrameLayout(activity)
+        overlay.setLayoutParams(FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        overlay.setBackgroundColor(_c("#FF0F0F12"))
+        overlay.setClickable(True)
+        overlay.setFocusable(True)
+
+        content = LinearLayout(activity)
+        content.setOrientation(LinearLayout.VERTICAL)
+        content.setLayoutParams(FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        content.setPadding(_dp(16), _statusbar_pad() + _dp(10), _dp(16), _dp(14))
+        overlay.addView(content)
+
+        top = LinearLayout(activity)
+        top.setOrientation(LinearLayout.HORIZONTAL)
+        top.setGravity(Gravity.CENTER_VERTICAL)
+        content.addView(top)
+
+        back = TextView(activity)
+        back.setText("←")
+        back.setTextSize(20)
+        back.setTextColor(_c("#FFFFFFFF"))
+        back.setPadding(_dp(6), _dp(6), _dp(12), _dp(6))
+        back.setClickable(True)
+        back.setOnClickListener(OnClickListener(lambda v: self._close_category_screen(animated=True)))
+        top.addView(back)
+
+        title = TextView(activity)
+        title.setText("Категория подписки")
+        title.setTextSize(20)
+        title.setTextColor(_c("#FFFFFFFF"))
+        top.addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
+
+        show = ("@" + sub_key.split(":", 1)[1]) if sub_key.startswith("tguser:") else sub_key
+        source_tv = TextView(activity)
+        source_tv.setText(show)
+        source_tv.setTextSize(13)
+        source_tv.setTextColor(_c("#FFFFFFFF"))
+        source_tv.setAlpha(0.8)
+        source_tv.setPadding(0, _dp(16), 0, _dp(10))
+        content.addView(source_tv)
+
+        category_input = EditText(activity)
+        category_input.setHint("Любая категория")
+        category_input.setSingleLine(True)
+        category_input.setText(_norm_category(target.get("category", "")))
+        category_input.setPadding(_dp(12), _dp(12), _dp(12), _dp(12))
+        category_input.setTextColor(_c("#FFFFFFFF"))
+        try:
+            category_input.setHintTextColor(_c("#66FFFFFF"))
+        except Exception:
+            pass
+        category_input.setBackground(self._bg_rounded("#1AFFFFFF"))
+        content.addView(category_input, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+
+        push = View(activity)
+        push.setLayoutParams(LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1.0))
+        content.addView(push)
+
+        save_btn = self._primary_button(activity, "Сохранить", lambda: self._save_sub_category(sub_key, category_input))
+        content.addView(save_btn, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+
+        self._cat_overlay = overlay
+        self._cat_content = content
+        decor.addView(overlay)
+        self._bind_back_handler(overlay, lambda: self._close_category_screen(animated=True), "_cat_back_listener")
+
+        try:
+            overlay.setAlpha(0.0)
+            content.setTranslationY(float(_dp(16)))
+            overlay.animate().alpha(1.0).setDuration(160).start()
+            anim = content.animate().translationY(0.0).setDuration(220)
+            try:
+                anim.setInterpolator(DecelerateInterpolator())
+            except Exception:
+                pass
+            anim.start()
+        except Exception:
+            pass
+
+    def _save_sub_category(self, sub_key: str, category_input: EditText):
+        cat = _norm_category(str(category_input.getText().toString()))
+        entries = self._get_sub_entries()
+        changed = False
+        for it in entries:
+            if str(it.get("sub") or "") == sub_key:
+                it["category"] = cat
+                changed = True
+                break
+        if not changed:
+            return
+        self._set_sub_entries(entries)
+        self._close_category_screen(animated=True)
+        if self._overlay is not None:
+            self._render()
+
+    def _close_category_screen(self, animated: bool):
+        overlay = self._cat_overlay
+        content = self._cat_content
+        if overlay is None:
+            return
+
+        def detach():
+            try:
+                parent = overlay.getParent()
+                if parent and isinstance(parent, ViewGroup):
+                    parent.removeView(overlay)
+            except Exception:
+                pass
+            self._cat_overlay = None
+            self._cat_content = None
+            self._cat_back_listener = None
+
+        if not animated or content is None:
+            detach()
+            return
+
+        try:
+            overlay.animate().alpha(0.0).setDuration(140).start()
+            content.animate().translationY(float(_dp(16))).setDuration(160).start()
+        except Exception:
+            pass
+        try:
+            AndroidUtilities.runOnUIThread(Runnable(detach), 180)
+        except Exception:
+            run_on_ui_thread(detach)
+
     # ---------- Post screen ----------
     def _open_post_screen(self, fragment, item: Dict[str, Any]):
         if self._post_overlay is not None:
@@ -1936,7 +2239,8 @@ class Plugin(BasePlugin):
 
         title_raw = item.get("title", "") or ""
         link = item.get("link", "")
-        src = item.get("source", "")
+        src = _format_source_line(item)
+        cat = _norm_category(item.get("category", ""))
         sort_ts = int(item.get("sort_ts", 0) or 0)
         body_raw = item.get("text", "") or ""
         img = item.get("image", "") or ""
@@ -2012,6 +2316,8 @@ class Plugin(BasePlugin):
         meta = []
         if src:
             meta.append(src)
+        if cat:
+            meta.append(f"#{cat}")
         dt = _format_ru_datetime(sort_ts)
         if dt:
             meta.append(dt)
@@ -2305,6 +2611,7 @@ class Plugin(BasePlugin):
         if not self._list_container:
             return
         ctx = self._list_container.getContext()
+        self._update_source_button()
         try:
             self._list_container.removeAllViews()
         except Exception:
@@ -2326,9 +2633,10 @@ class Plugin(BasePlugin):
             self._list_container.addView(t)
 
     def _render_feed(self, ctx):
-        items = self._get_cache()
-        log(f"[RSS] render_feed cache_items={len(items)} mode={self._mode}")
-        if not items:
+        all_items = self._get_cache()
+        log(f"[RSS] render_feed cache_items={len(all_items)} mode={self._mode}")
+
+        if not all_items:
             t = TextView(ctx)
             t.setText("Лента пустая.\nОткрой «Подписки» и нажми «+», затем потяни ленту вниз для обновления.")
             t.setTextSize(14)
@@ -2337,12 +2645,32 @@ class Plugin(BasePlugin):
             self._list_container.addView(t)
             return
 
+        items = all_items
+        if self._source_filter:
+            filt = self._source_filter
+            items = []
+            for it in all_items:
+                src_val = _format_source_line(it).strip()
+                if not src_val:
+                    src_val = str(it.get("source", "") or "").strip()
+                if src_val == filt:
+                    items.append(it)
+
+        if not items:
+            t = TextView(ctx)
+            t.setText("По выбранному источнику пока ничего нет.\nНажми кнопку «Источник», чтобы переключить фильтр на «все».")
+            t.setTextSize(14)
+            t.setTextColor(_c("#FFFFFFFF"))
+            t.setAlpha(0.75)
+            self._list_container.addView(t)
+            return
+
         items.sort(key=lambda x: int(x.get("sort_ts", x.get("ts", 0) or 0) or 0), reverse=True)
-        img_h = _dp(90)
 
         for it in items[:320]:
             title = _strip_tags_and_format(str(it.get("title", "") or ""))
             src = _format_source_line(it)
+            cat = _norm_category(it.get("category", ""))
             sort_ts = int(it.get("sort_ts", 0) or 0)
             img = str(it.get("image", "") or "")
             text = str(it.get("text", "") or "")
@@ -2372,6 +2700,8 @@ class Plugin(BasePlugin):
             meta = []
             if src:
                 meta.append(src)
+            if cat:
+                meta.append(f"#{cat}")
             dt = _format_ru_datetime(sort_ts)
             if dt:
                 meta.append(dt)
@@ -2428,7 +2758,7 @@ class Plugin(BasePlugin):
                 self._load_image_into(img, iv)
 
     def _render_subs(self, ctx):
-        subs = self._get_subs()
+        entries = self._get_sub_entries()
 
         h = TextView(ctx)
         h.setText("Подписки")
@@ -2437,7 +2767,7 @@ class Plugin(BasePlugin):
         h.setPadding(0, _dp(6), 0, _dp(12))
         self._list_container.addView(h)
 
-        if not subs:
+        if not entries:
             t = TextView(ctx)
             t.setText("Подписок нет.\nНажми «+» и вставь RSS или @username.")
             t.setTextSize(14)
@@ -2445,7 +2775,9 @@ class Plugin(BasePlugin):
             t.setAlpha(0.75)
             self._list_container.addView(t)
         else:
-            for i, sub in enumerate(subs, start=1):
+            for it in entries:
+                sub = str(it.get("sub") or "")
+                cat = _norm_category(it.get("category", ""))
                 row = LinearLayout(ctx)
                 row.setOrientation(LinearLayout.HORIZONTAL)
                 row.setGravity(Gravity.CENTER_VERTICAL)
@@ -2454,14 +2786,29 @@ class Plugin(BasePlugin):
 
                 show = ("@" + sub.split(":", 1)[1]) if sub.startswith("tguser:") else sub
 
+                txt_col = LinearLayout(ctx)
+                txt_col.setOrientation(LinearLayout.VERTICAL)
+                row.addView(txt_col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
+
                 tv = TextView(ctx)
                 tv.setText(show)
                 tv.setTextSize(14)
                 tv.setTextColor(_c("#FFFFFFFF"))
                 tv.setAlpha(0.92)
-                row.addView(tv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
+                txt_col.addView(tv)
 
-                delb = self._top_button(ctx, "—", lambda idx=i: self._remove_sub_by_index(idx))
+                if cat:
+                    tv_cat = TextView(ctx)
+                    tv_cat.setText(f"Категория: {cat}")
+                    tv_cat.setTextSize(12)
+                    tv_cat.setTextColor(_c("#FFFFFFFF"))
+                    tv_cat.setAlpha(0.62)
+                    tv_cat.setPadding(0, _dp(3), 0, 0)
+                    txt_col.addView(tv_cat)
+
+                cat_btn = self._top_button(ctx, "Кат.", lambda key=sub: self._open_category_screen(key))
+                delb = self._top_button(ctx, "—", lambda key=sub: self._remove_sub(key))
+                row.addView(cat_btn)
                 row.addView(self._spacer_h(ctx, 8))
                 row.addView(delb)
 
@@ -2476,13 +2823,11 @@ class Plugin(BasePlugin):
         lp_plus.bottomMargin = _dp(4)
         self._list_container.addView(plus_btn, lp_plus)
 
-    def _remove_sub_by_index(self, idx_1based: int):
-        subs = self._get_subs()
-        i = idx_1based - 1
-        if i < 0 or i >= len(subs):
+    def _remove_sub(self, sub_key: str):
+        if not sub_key:
             return
-        subs.pop(i)
-        self._set_subs(subs)
+        entries = [x for x in self._get_sub_entries() if str(x.get("sub") or "") != sub_key]
+        self._set_sub_entries(entries)
         self._render()
 
     # ---------- open link ----------
