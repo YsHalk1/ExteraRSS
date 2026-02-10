@@ -1269,6 +1269,14 @@ class Plugin(BasePlugin):
             log(f"[RSS] _set_cache error: {e}")
 
     # ---------- refresh ----------
+    def _set_refreshing_ui(self, val: bool):
+        self._refreshing = bool(val)
+        try:
+            if self._refresh_bar is not None:
+                self._refresh_bar.setVisibility(View.VISIBLE if self._refreshing else View.GONE)
+        except Exception:
+            pass
+
     def _refresh_now(self):
         subs = self._get_subs()
         old = self._get_cache()
@@ -1340,12 +1348,7 @@ class Plugin(BasePlugin):
             finally:
                 def ui():
                     # ✅ всегда сбрасываем индикатор
-                    self._refreshing = False
-                    try:
-                        if self._refresh_bar is not None:
-                            self._refresh_bar.setVisibility(View.GONE)
-                    except Exception:
-                        pass
+                    self._set_refreshing_ui(False)
                     self._render()
                 run_on_ui_thread(ui)
 
@@ -1489,7 +1492,7 @@ class Plugin(BasePlugin):
         top.addView(self._spacer_h(activity, 8))
         top.addView(self._top_button(activity, "Импорт", lambda: self._open_add_feed_screen(fragment)))
         top.addView(self._spacer_h(activity, 8))
-        top.addView(self._top_button(activity, "Обновить", lambda: (set_refreshing(True), self._refresh_async())))
+        top.addView(self._top_button(activity, "Обновить", lambda: (self._set_refreshing_ui(True), self._refresh_async())))
         top.addView(self._spacer_h(activity, 8))
         top.addView(self._top_button(activity, "Закрыть", lambda: self._close(animated=True)))
 
@@ -1556,20 +1559,16 @@ class Plugin(BasePlugin):
         sv.addView(list_container)
 
         self._main_scroll = sv
+        self._overlay = overlay
+        self._content = content
+        self._list_container = list_container
+        self._mode = "feed"
 
         # --- pull-to-refresh без androidx ---
-        def set_refreshing(val: bool):
-            self._refreshing = bool(val)
-            try:
-                if self._refresh_bar is not None:
-                    self._refresh_bar.setVisibility(View.VISIBLE if self._refreshing else View.GONE)
-            except Exception:
-                pass
-
         def start_refresh_from_pull():
             if self._refreshing:
                 return
-            set_refreshing(True)
+            self._set_refreshing_ui(True)
             self._refresh_async()
 
         def on_touch(_v, ev):
@@ -1585,14 +1584,17 @@ class Plugin(BasePlugin):
                 # важно: тянем только когда ScrollView уже в самом верху
                 at_top = (sv.getScrollY() <= 0)
 
-                act = ev.getAction()
+                try:
+                    act = int(ev.getActionMasked())
+                except Exception:
+                    act = int(ev.getAction())
 
-                if act == 0:  # ACTION_DOWN
+                if act == MotionEvent.ACTION_DOWN:
                     self._pull_start_y = float(ev.getY())
                     self._pull_armed = at_top
                     return False
 
-                if act == 2:  # ACTION_MOVE
+                if act == MotionEvent.ACTION_MOVE:
                     if not self._pull_armed:
                         return False
                     if not at_top:
@@ -1614,7 +1616,7 @@ class Plugin(BasePlugin):
 
                     return False
 
-                if act in (1, 3):  # ACTION_UP / ACTION_CANCEL
+                if act in (MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL):
                     self._pull_armed = False
                     return False
 
@@ -1623,15 +1625,16 @@ class Plugin(BasePlugin):
 
             return False
 
-        sv.setOnTouchListener(dynamic_proxy(
-            "android.view.View$OnTouchListener",
-            {"onTouch": on_touch}
-        ))
-
-        self._overlay = overlay
-        self._content = content
-        self._list_container = list_container
-        self._mode = "feed"
+        try:
+            listener = None
+            try:
+                listener = dynamic_proxy("android.view.View$OnTouchListener", {"onTouch": on_touch})
+            except Exception:
+                listener = dynamic_proxy("android.view.View.OnTouchListener", {"onTouch": on_touch})
+            if listener is not None:
+                sv.setOnTouchListener(listener)
+        except Exception as e:
+            log(f"[RSS] pull-to-refresh disabled: {e}")
 
         self._render()
 
@@ -1652,7 +1655,7 @@ class Plugin(BasePlugin):
 
 
         if self.get_setting("auto_refresh", True):
-            set_refreshing(True)
+            self._set_refreshing_ui(True)
             self._refresh_async()
         self._render()
 
