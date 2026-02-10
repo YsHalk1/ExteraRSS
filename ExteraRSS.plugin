@@ -49,6 +49,28 @@ from java.lang import Runnable
 from android.view import MotionEvent, KeyEvent
 from android.widget import ProgressBar
 
+try:
+    from android_utils import OnTouchListener as _OnTouchListener
+except ImportError:
+    class _OnTouchListener(dynamic_proxy(View.OnTouchListener)):
+        def __init__(self, fn):
+            super().__init__()
+            self._fn = fn
+
+        def onTouch(self, v, ev):
+            return bool(self._fn(v, ev))
+
+try:
+    from android_utils import OnKeyListener as _OnKeyListener
+except ImportError:
+    class _OnKeyListener(dynamic_proxy(View.OnKeyListener)):
+        def __init__(self, fn):
+            super().__init__()
+            self._fn = fn
+
+        def onKey(self, v, key_code, event):
+            return bool(self._fn(v, key_code, event))
+
 
 __id__ = "RssMyFeed"
 __name__ = "RSS Моя лента"
@@ -1293,12 +1315,7 @@ class Plugin(BasePlugin):
                 except Exception:
                     return False
 
-            listener = None
-            try:
-                listener = dynamic_proxy("android.view.View$OnKeyListener", {"onKey": on_key})
-            except Exception:
-                listener = dynamic_proxy("android.view.View.OnKeyListener", {"onKey": on_key})
-
+            listener = _OnKeyListener(on_key)
             overlay.setOnKeyListener(listener)
             try:
                 overlay.requestFocus()
@@ -1604,6 +1621,7 @@ class Plugin(BasePlugin):
         def start_refresh_from_pull():
             if self._refreshing:
                 return
+            log("[RSS] pull refresh triggered")
             self._set_refreshing_ui(True)
             self._refresh_async()
 
@@ -1664,14 +1682,10 @@ class Plugin(BasePlugin):
             return False
 
         try:
-            listener = None
-            try:
-                listener = dynamic_proxy("android.view.View$OnTouchListener", {"onTouch": on_touch})
-            except Exception:
-                listener = dynamic_proxy("android.view.View.OnTouchListener", {"onTouch": on_touch})
-            if listener is not None:
-                self._main_touch_listener = listener
-                sv.setOnTouchListener(listener)
+            listener = _OnTouchListener(on_touch)
+            self._main_touch_listener = listener
+            sv.setOnTouchListener(listener)
+            log("[RSS] pull-to-refresh enabled")
         except Exception as e:
             self._main_touch_listener = None
             log(f"[RSS] pull-to-refresh disabled: {e}")
@@ -1741,28 +1755,21 @@ class Plugin(BasePlugin):
             self._render()
             return
         try:
-            def after_out():
-                self._render()
-                try:
-                    container.setAlpha(0.0)
-                    container.setTranslationY(float(_dp(8)))
-                    anim_in = container.animate().alpha(1.0).translationY(0.0).setDuration(170)
-                    try:
-                        anim_in.setInterpolator(DecelerateInterpolator())
-                    except Exception:
-                        pass
-                    anim_in.start()
-                except Exception:
-                    pass
-
-            anim_out = container.animate().alpha(0.0).translationY(float(_dp(-6))).setDuration(90)
+            container.animate().cancel()
+        except Exception:
+            pass
+        self._render()
+        try:
+            container.setAlpha(0.0)
+            container.setTranslationY(float(_dp(8)))
+            anim_in = container.animate().alpha(1.0).translationY(0.0).setDuration(170)
             try:
-                anim_out.setInterpolator(DecelerateInterpolator())
+                anim_in.setInterpolator(DecelerateInterpolator())
             except Exception:
                 pass
-            anim_out.withEndAction(Runnable(after_out)).start()
+            anim_in.start()
         except Exception:
-            self._render()
+            pass
 
     # ---------- Add feed screen ----------
     def _open_add_feed_screen(self, fragment):
