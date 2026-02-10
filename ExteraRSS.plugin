@@ -1777,11 +1777,12 @@ class Plugin(BasePlugin):
                 pass
             try:
                 v.animate().cancel()
-                v.animate().scaleX(0.96).scaleY(0.96).setDuration(70).start()
-                AndroidUtilities.runOnUIThread(
-                    Runnable(lambda: v.animate().scaleX(1.0).scaleY(1.0).setDuration(120).start()),
-                    75
-                )
+                a = v.animate().scaleX(0.96).scaleY(0.96).setDuration(70)
+                try:
+                    a.withEndAction(Runnable(lambda: v.animate().scaleX(1.0).scaleY(1.0).setDuration(120).start()))
+                except Exception:
+                    pass
+                a.start()
             except Exception:
                 pass
             try:
@@ -1813,26 +1814,24 @@ class Plugin(BasePlugin):
     def _animate_entry(self, v: View, idx: int = 0):
         try:
             delay = int(min(max(idx, 0), 10) * 22)
-            v.setAlpha(0.0)
-            v.setTranslationY(float(_dp(10)))
-
-            def run():
-                try:
-                    anim = v.animate().alpha(1.0).translationY(0.0).setDuration(180)
-                    try:
-                        anim.setInterpolator(DecelerateInterpolator())
-                    except Exception:
-                        pass
-                    anim.start()
-                except Exception:
-                    pass
-
-            if delay > 0:
-                AndroidUtilities.runOnUIThread(Runnable(run), delay)
-            else:
-                run()
+            v.setAlpha(1.0)
+            v.setTranslationY(float(_dp(6)))
+            anim = v.animate().translationY(0.0).setDuration(160)
+            try:
+                anim.setStartDelay(delay)
+            except Exception:
+                pass
+            try:
+                anim.setInterpolator(DecelerateInterpolator())
+            except Exception:
+                pass
+            anim.start()
         except Exception:
-            pass
+            try:
+                v.setAlpha(1.0)
+                v.setTranslationY(0.0)
+            except Exception:
+                pass
 
     # ---------- MAIN SCREEN ----------
     def _open(self, fragment):
@@ -1988,14 +1987,20 @@ class Plugin(BasePlugin):
         bottom_nav.addView(nav_cats, lp_cats)
         bottom_nav.addView(nav_subs, lp_subs)
         try:
-            bottom_nav.setAlpha(0.0)
+            bottom_nav.setAlpha(1.0)
             bottom_nav.setTranslationY(float(_dp(14)))
-            AndroidUtilities.runOnUIThread(
-                Runnable(lambda: bottom_nav.animate().alpha(1.0).translationY(0.0).setDuration(220).start()),
-                80
-            )
+            nav_anim = bottom_nav.animate().translationY(0.0).setDuration(180)
+            try:
+                nav_anim.setStartDelay(80)
+            except Exception:
+                pass
+            nav_anim.start()
         except Exception:
-            pass
+            try:
+                bottom_nav.setAlpha(1.0)
+                bottom_nav.setTranslationY(0.0)
+            except Exception:
+                pass
 
         self._main_scroll = sv
         self._overlay = overlay
@@ -2156,9 +2161,9 @@ class Plugin(BasePlugin):
         self._render()
         self._update_bottom_nav_state()
         try:
-            container.setAlpha(0.0)
-            container.setTranslationY(float(_dp(8)))
-            anim_in = container.animate().alpha(1.0).translationY(0.0).setDuration(170)
+            container.setAlpha(1.0)
+            container.setTranslationY(float(_dp(6)))
+            anim_in = container.animate().translationY(0.0).setDuration(150)
             try:
                 anim_in.setInterpolator(DecelerateInterpolator())
             except Exception:
