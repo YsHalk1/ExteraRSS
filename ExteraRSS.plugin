@@ -1490,10 +1490,6 @@ class Plugin(BasePlugin):
         top.addView(self._spacer_h(activity, 8))
         top.addView(self._top_button(activity, "Подписки", lambda: self._set_mode("subs")))
         top.addView(self._spacer_h(activity, 8))
-        top.addView(self._top_button(activity, "Импорт", lambda: self._open_add_feed_screen(fragment)))
-        top.addView(self._spacer_h(activity, 8))
-        top.addView(self._top_button(activity, "Обновить", lambda: (self._set_refreshing_ui(True), self._refresh_async())))
-        top.addView(self._spacer_h(activity, 8))
         top.addView(self._top_button(activity, "Закрыть", lambda: self._close(animated=True)))
 
         hint = TextView(activity)
@@ -1520,7 +1516,7 @@ class Plugin(BasePlugin):
         refresh_bar.addView(pb, LinearLayout.LayoutParams(_dp(18), _dp(18)))
 
         txt = TextView(activity)
-        txt.setText("Обновление… (потяни вниз сверху)")
+        txt.setText("Обновление… (потяни вниз сверху как в браузере)")
         txt.setTextSize(13)
         txt.setTextColor(_c("#FFFFFFFF"))
         txt.setAlpha(0.85)
@@ -1747,8 +1743,6 @@ class Plugin(BasePlugin):
         title.setTextSize(20)
         title.setTextColor(_c("#FFFFFFFF"))
         top.addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
-
-        top.addView(self._top_button(activity, "Импорт", lambda: None))
 
         sp = View(activity)
         sp.setLayoutParams(LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, _dp(18)))
@@ -2266,7 +2260,7 @@ class Plugin(BasePlugin):
         log(f"[RSS] render_feed cache_items={len(items)} mode={self._mode}")
         if not items:
             t = TextView(ctx)
-            t.setText("Лента пустая.\nНажми «Импорт» чтобы добавить RSS или @username, затем «Обновить».")
+            t.setText("Лента пустая.\nОткрой «Подписки» и нажми «+», затем потяни ленту вниз для обновления.")
             t.setTextSize(14)
             t.setTextColor(_c("#FFFFFFFF"))
             t.setAlpha(0.75)
@@ -2366,16 +2360,26 @@ class Plugin(BasePlugin):
     def _render_subs(self, ctx):
         subs = self._get_subs()
 
+        head = LinearLayout(ctx)
+        head.setOrientation(LinearLayout.HORIZONTAL)
+        head.setGravity(Gravity.CENTER_VERTICAL)
+        self._list_container.addView(head)
+
         h = TextView(ctx)
         h.setText("Подписки")
         h.setTextSize(18)
         h.setTextColor(_c("#FFFFFFFF"))
         h.setPadding(0, _dp(6), 0, _dp(12))
-        self._list_container.addView(h)
+        head.addView(h, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
+
+        plus_btn = self._top_button(ctx, "+", lambda: self._open_add_feed_screen(get_last_fragment()))
+        lp_plus = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp_plus.bottomMargin = _dp(8)
+        head.addView(plus_btn, lp_plus)
 
         if not subs:
             t = TextView(ctx)
-            t.setText("Подписок нет.\nНажми «Импорт» и вставь RSS или @username.")
+            t.setText("Подписок нет.\nНажми «+» и вставь RSS или @username.")
             t.setTextSize(14)
             t.setTextColor(_c("#FFFFFFFF"))
             t.setAlpha(0.75)
