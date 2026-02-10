@@ -1116,6 +1116,8 @@ class Plugin(BasePlugin):
         self._add_content: Optional[LinearLayout] = None
         self._cat_overlay: Optional[FrameLayout] = None
         self._cat_content: Optional[LinearLayout] = None
+        self._src_overlay: Optional[FrameLayout] = None
+        self._src_content: Optional[LinearLayout] = None
 
         # post
         self._post_overlay: Optional[FrameLayout] = None
@@ -1141,11 +1143,14 @@ class Plugin(BasePlugin):
         self._main_back_listener = None
         self._add_back_listener = None
         self._cat_back_listener = None
+        self._src_back_listener = None
         self._post_back_listener = None
         self._img_back_listener = None
 
         self._source_filter: str = ""
         self._source_btn: Optional[TextView] = None
+        self._nav_feed_btn: Optional[TextView] = None
+        self._nav_subs_btn: Optional[TextView] = None
 
     # ---- UI rounding ----
     def _corner_radius_px(self) -> int:
@@ -1155,6 +1160,14 @@ class Plugin(BasePlugin):
         bg = GradientDrawable()
         bg.setColor(_c(fill_hex, "#FF1E1E24"))
         bg.setCornerRadius(float(self._corner_radius_px()))
+        if stroke_dp and stroke_dp > 0:
+            bg.setStroke(_dp(stroke_dp), _c(stroke_hex, "#00000000"))
+        return bg
+
+    def _bg_pill(self, fill_hex: str, stroke_hex: str = "#00000000", stroke_dp: float = 0.0):
+        bg = GradientDrawable()
+        bg.setColor(_c(fill_hex, "#FF1E1E24"))
+        bg.setCornerRadius(float(_dp(18)))
         if stroke_dp and stroke_dp > 0:
             bg.setStroke(_dp(stroke_dp), _c(stroke_hex, "#00000000"))
         return bg
@@ -1175,6 +1188,7 @@ class Plugin(BasePlugin):
         run_on_ui_thread(lambda: self._close(animated=False))
         run_on_ui_thread(lambda: self._close_add_feed_screen(animated=False))
         run_on_ui_thread(lambda: self._close_category_screen(animated=False))
+        run_on_ui_thread(lambda: self._close_source_picker_screen(animated=False))
         run_on_ui_thread(lambda: self._close_post_screen(animated=False))
         run_on_ui_thread(lambda: self._close_image_screen(animated=False))
 
@@ -1369,11 +1383,11 @@ class Plugin(BasePlugin):
 
     def _source_filter_label(self) -> str:
         if not self._source_filter:
-            return "Источник: все"
+            return "Источник: все ▾"
         name = self._source_filter
         if len(name) > 22:
             name = name[:21].rstrip() + "…"
-        return f"Источник: {name}"
+        return f"Источник: {name} ▾"
 
     def _update_source_button(self):
         try:
@@ -1392,15 +1406,150 @@ class Plugin(BasePlugin):
                 vals.append(s)
         return _uniq_keep_order(vals)
 
-    def _cycle_source_filter(self):
-        opts = [""] + self._available_sources()
-        if not opts:
-            opts = [""]
-        cur = self._source_filter if self._source_filter in opts else ""
-        idx = opts.index(cur)
-        self._source_filter = opts[(idx + 1) % len(opts)]
+    def _source_filter_options(self) -> List[str]:
+        return [""] + self._available_sources()
+
+    def _set_source_filter(self, source_value: str):
+        val = str(source_value or "")
+        opts = self._source_filter_options()
+        self._source_filter = val if val in opts else ""
         self._update_source_button()
         self._render()
+
+    def _open_source_picker_screen(self):
+        if self._src_overlay is not None:
+            return
+        fragment = get_last_fragment()
+        if not fragment:
+            return
+        activity = fragment.getParentActivity()
+        if not activity:
+            return
+        decor = activity.getWindow().getDecorView()
+        if not isinstance(decor, ViewGroup):
+            return
+
+        overlay = FrameLayout(activity)
+        overlay.setLayoutParams(FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+        overlay.setBackgroundColor(_c("#A6000000"))
+        overlay.setClickable(True)
+        overlay.setFocusable(True)
+        overlay.setOnClickListener(OnClickListener(lambda _v: self._close_source_picker_screen(animated=True)))
+
+        card = LinearLayout(activity)
+        card.setOrientation(LinearLayout.VERTICAL)
+        card.setPadding(_dp(12), _dp(12), _dp(12), _dp(12))
+        card.setBackground(self._bg_rounded("#FF171A24", "#22FFFFFF", 1.0))
+        card.setClickable(True)
+        lp_card = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        )
+        lp_card.leftMargin = _dp(16)
+        lp_card.rightMargin = _dp(16)
+        lp_card.topMargin = _statusbar_pad() + _dp(14)
+        overlay.addView(card, lp_card)
+
+        title = TextView(activity)
+        title.setText("Выбор источника")
+        title.setTextSize(17)
+        title.setTextColor(_c("#FFFFFFFF"))
+        title.setPadding(_dp(2), _dp(2), _dp(2), _dp(10))
+        card.addView(title)
+
+        sv = ScrollView(activity)
+        sv.setLayoutParams(LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+        card.addView(sv)
+
+        col = LinearLayout(activity)
+        col.setOrientation(LinearLayout.VERTICAL)
+        sv.addView(col)
+
+        opts = self._source_filter_options()
+        cur = self._source_filter if self._source_filter in opts else ""
+        for source_name in opts:
+            label = "Все источники" if not source_name else source_name
+            btn = TextView(activity)
+            btn.setText(label)
+            btn.setTextSize(14)
+            btn.setTextColor(_c("#FFFFFFFF"))
+            btn.setPadding(_dp(12), _dp(10), _dp(12), _dp(10))
+            btn.setClickable(True)
+            selected = (source_name == cur)
+            btn.setAlpha(1.0 if selected else 0.9)
+            btn.setBackground(self._bg_rounded("#33FFFFFF" if selected else "#121AFFFFFF"))
+            btn.setOnClickListener(OnClickListener(
+                lambda _v, val=source_name: (self._set_source_filter(val), self._close_source_picker_screen(animated=True))
+            ))
+            lp_btn = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            lp_btn.bottomMargin = _dp(8)
+            col.addView(btn, lp_btn)
+
+        close_btn = self._top_button(activity, "Закрыть", lambda: self._close_source_picker_screen(animated=True))
+        lp_close = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        )
+        lp_close.topMargin = _dp(6)
+        card.addView(close_btn, lp_close)
+
+        self._src_overlay = overlay
+        self._src_content = card
+        decor.addView(overlay)
+        self._bind_back_handler(overlay, lambda: self._close_source_picker_screen(animated=True), "_src_back_listener")
+
+        try:
+            overlay.setAlpha(0.0)
+            card.setTranslationY(float(_dp(-10)))
+            overlay.animate().alpha(1.0).setDuration(120).start()
+            anim = card.animate().translationY(0.0).setDuration(160)
+            try:
+                anim.setInterpolator(DecelerateInterpolator())
+            except Exception:
+                pass
+            anim.start()
+        except Exception:
+            pass
+
+    def _close_source_picker_screen(self, animated: bool):
+        overlay = self._src_overlay
+        content = self._src_content
+        if overlay is None:
+            return
+
+        def detach():
+            try:
+                parent = overlay.getParent()
+                if parent and isinstance(parent, ViewGroup):
+                    parent.removeView(overlay)
+            except Exception:
+                pass
+            self._src_overlay = None
+            self._src_content = None
+            self._src_back_listener = None
+
+        if not animated or content is None:
+            detach()
+            return
+
+        try:
+            overlay.animate().alpha(0.0).setDuration(110).start()
+            content.animate().translationY(float(_dp(-10))).setDuration(120).start()
+        except Exception:
+            pass
+        try:
+            AndroidUtilities.runOnUIThread(Runnable(detach), 150)
+        except Exception:
+            run_on_ui_thread(detach)
 
     def _refresh_now(self):
         sub_entries = self._get_sub_entries()
@@ -1560,6 +1709,41 @@ class Plugin(BasePlugin):
         v.setLayoutParams(LinearLayout.LayoutParams(_dp(wdp), 1))
         return v
 
+    def _bottom_nav_button(self, ctx, text: str, cb):
+        b = TextView(ctx)
+        b.setText(text)
+        b.setTextSize(15)
+        b.setGravity(Gravity.CENTER)
+        b.setTextColor(_c("#FFFFFFFF"))
+        b.setPadding(_dp(10), _dp(10), _dp(10), _dp(10))
+        b.setClickable(True)
+        b.setBackground(self._bg_pill("#00000000"))
+
+        def on_click(v):
+            try:
+                v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+            except Exception:
+                pass
+            try:
+                cb()
+            except Exception as e:
+                log(f"[RSS] bottom nav button error: {e}")
+
+        b.setOnClickListener(OnClickListener(on_click))
+        return b
+
+    def _update_bottom_nav_state(self):
+        try:
+            if self._nav_feed_btn is None or self._nav_subs_btn is None:
+                return
+            is_feed = (self._mode != "subs")
+            self._nav_feed_btn.setBackground(self._bg_pill("#2AFFFFFF" if is_feed else "#00000000"))
+            self._nav_subs_btn.setBackground(self._bg_pill("#2AFFFFFF" if not is_feed else "#00000000"))
+            self._nav_feed_btn.setAlpha(1.0 if is_feed else 0.78)
+            self._nav_subs_btn.setAlpha(1.0 if not is_feed else 0.78)
+        except Exception:
+            pass
+
     # ---------- MAIN SCREEN ----------
     def _open(self, fragment):
         log("[RSS] _open: start")
@@ -1619,7 +1803,7 @@ class Plugin(BasePlugin):
         title.setTextColor(_c("#FFFFFFFF"))
         top.addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
 
-        source_btn = self._top_button(activity, self._source_filter_label(), lambda: self._cycle_source_filter())
+        source_btn = self._top_button(activity, self._source_filter_label(), lambda: self._open_source_picker_screen())
         self._source_btn = source_btn
         top.addView(source_btn)
         top.addView(self._spacer_h(activity, 8))
@@ -1691,16 +1875,20 @@ class Plugin(BasePlugin):
         bottom_nav = LinearLayout(activity)
         bottom_nav.setOrientation(LinearLayout.HORIZONTAL)
         bottom_nav.setGravity(Gravity.CENTER_VERTICAL)
+        bottom_nav.setPadding(_dp(4), _dp(4), _dp(4), _dp(4))
+        bottom_nav.setBackground(self._bg_pill("#1C1AFFFFFF", "#24FFFFFF", 1.0))
         lp_nav = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         lp_nav.topMargin = _dp(10)
         content.addView(bottom_nav, lp_nav)
 
-        nav_feed = self._top_button(activity, "Лента", lambda: self._set_mode("feed"))
-        nav_subs = self._top_button(activity, "Подписки", lambda: self._set_mode("subs"))
+        nav_feed = self._bottom_nav_button(activity, "Лента", lambda: self._set_mode("feed"))
+        nav_subs = self._bottom_nav_button(activity, "Подписки", lambda: self._set_mode("subs"))
+        self._nav_feed_btn = nav_feed
+        self._nav_subs_btn = nav_subs
 
         lp_feed = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0)
         lp_subs = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0)
-        lp_subs.leftMargin = _dp(8)
+        lp_subs.leftMargin = _dp(6)
 
         bottom_nav.addView(nav_feed, lp_feed)
         bottom_nav.addView(nav_subs, lp_subs)
@@ -1710,6 +1898,7 @@ class Plugin(BasePlugin):
         self._content = content
         self._list_container = list_container
         self._mode = "feed"
+        self._update_bottom_nav_state()
 
         # --- pull-to-refresh без androidx ---
         def start_refresh_from_pull():
@@ -1812,6 +2001,7 @@ class Plugin(BasePlugin):
         content = self._content
         if overlay is None:
             return
+        self._close_source_picker_screen(animated=False)
 
         def detach():
             try:
@@ -1826,6 +2016,8 @@ class Plugin(BasePlugin):
             self._main_touch_listener = None
             self._main_back_listener = None
             self._source_btn = None
+            self._nav_feed_btn = None
+            self._nav_subs_btn = None
 
         if not animated or content is None:
             detach()
@@ -1846,6 +2038,7 @@ class Plugin(BasePlugin):
             return
         self._mode = mode
         self._update_source_button()
+        self._update_bottom_nav_state()
         container = self._list_container
         if container is None:
             self._render()
@@ -1855,6 +2048,7 @@ class Plugin(BasePlugin):
         except Exception:
             pass
         self._render()
+        self._update_bottom_nav_state()
         try:
             container.setAlpha(0.0)
             container.setTranslationY(float(_dp(8)))
@@ -2612,6 +2806,7 @@ class Plugin(BasePlugin):
             return
         ctx = self._list_container.getContext()
         self._update_source_button()
+        self._update_bottom_nav_state()
         try:
             self._list_container.removeAllViews()
         except Exception:
