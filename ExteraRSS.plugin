@@ -1,20 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-RSS My Feed — fullscreen UI (как импорт) + экран поста + fullscreen изображения.
-
-Фиксы:
-- tguser: подписки больше не исчезают
-- сортировка строго по времени публикации (fallback на fetched_ts)
-- важные "(!)" — жёлтый оттенок
-- клик по картинке в посте -> fullscreen
-- дата/время RU: DD.MM.YYYY HH:MM (без секунд, без +0000)
-- FIX Unknown color: безопасный Color.parseColor + только валидные #AARRGGBB
-
-Доп.фикс:
-- TG посты "только медиа" (без текста/без caption) -> без подписи вообще
-  (не "(медиа)" и не "(без названия)", в ленте скрываем строку title если пустая)
-"""
-
 import json
 import time
 import threading
@@ -46,20 +29,42 @@ from datetime import datetime, timezone
 
 from java import dynamic_proxy
 from java.lang import Runnable
-from android.view import MotionEvent
+from android.view import MotionEvent, KeyEvent
 from android.widget import ProgressBar
 
+try:
+    from android_utils import OnTouchListener as _OnTouchListener
+except ImportError:
+    class _OnTouchListener(dynamic_proxy(View.OnTouchListener)):
+        def __init__(self, fn):
+            super().__init__()
+            self._fn = fn
 
-__id__ = "RssMyFeed"
-__name__ = "RSS Моя лента"
-__description__ = "RSS/Atom + Telegram (@username через t.me/s/) в одной ленте."
-__author__ = "@you"
+        def onTouch(self, v, ev):
+            return bool(self._fn(v, ev))
+
+try:
+    from android_utils import OnKeyListener as _OnKeyListener
+except ImportError:
+    class _OnKeyListener(dynamic_proxy(View.OnKeyListener)):
+        def __init__(self, fn):
+            super().__init__()
+            self._fn = fn
+
+        def onKey(self, v, key_code, event):
+            return bool(self._fn(v, key_code, event))
+
+
+__id__ = "ExteraRSS"
+__name__ = "ExteraRSS"
+__description__ = "RSS + Telegram в одной ленте."
+__author__ = "@RoflPlugins"
 __version__ = "1.4.5"
 __icon__ = "msg_list"
 __min_version__ = "11.12.0"
 
 # ---- UI tuning ----
-CORNER_RADIUS_DP = 10  # единое скругление для кнопок/карточек/картинок
+CORNER_RADIUS_DP = 10
 
 
 # ---------------- safe color ----------------
@@ -1122,6 +1127,11 @@ class Plugin(BasePlugin):
 
         self._main_scroll: Optional[ScrollView] = None
         self._refresh_bar: Optional[View] = None
+        self._main_touch_listener = None
+        self._main_back_listener = None
+        self._add_back_listener = None
+        self._post_back_listener = None
+        self._img_back_listener = None
 
     # ---- UI rounding ----
     def _corner_radius_px(self) -> int:
@@ -1269,6 +1279,43 @@ class Plugin(BasePlugin):
             log(f"[RSS] _set_cache error: {e}")
 
     # ---------- refresh ----------
+    def _bind_back_handler(self, overlay: View, close_cb, store_attr: str):
+        try:
+            overlay.setFocusable(True)
+            try:
+                overlay.setFocusableInTouchMode(True)
+            except Exception:
+                pass
+
+            def on_key(_v, key_code, event):
+                try:
+                    if int(key_code) != int(KeyEvent.KEYCODE_BACK):
+                        return False
+                    act = int(event.getAction())
+                    if act == int(KeyEvent.ACTION_UP):
+                        close_cb()
+                    return True
+                except Exception:
+                    return False
+
+            listener = _OnKeyListener(on_key)
+            overlay.setOnKeyListener(listener)
+            try:
+                overlay.requestFocus()
+            except Exception:
+                pass
+            setattr(self, store_attr, listener)
+        except Exception as e:
+            log(f"[RSS] back handler bind error: {e}")
+
+    def _set_refreshing_ui(self, val: bool):
+        self._refreshing = bool(val)
+        try:
+            if self._refresh_bar is not None:
+                self._refresh_bar.setVisibility(View.VISIBLE if self._refreshing else View.GONE)
+        except Exception:
+            pass
+
     def _refresh_now(self):
         subs = self._get_subs()
         old = self._get_cache()
@@ -1340,12 +1387,7 @@ class Plugin(BasePlugin):
             finally:
                 def ui():
                     # ✅ всегда сбрасываем индикатор
-                    self._refreshing = False
-                    try:
-                        if self._refresh_bar is not None:
-                            self._refresh_bar.setVisibility(View.GONE)
-                    except Exception:
-                        pass
+                    self._set_refreshing_ui(False)
                     self._render()
                 run_on_ui_thread(ui)
 
@@ -1462,6 +1504,7 @@ class Plugin(BasePlugin):
         except Exception as e:
             log(f"[RSS] _open: decor.addView failed: {e}")
             return
+        self._bind_back_handler(overlay, lambda: self._close(animated=True), "_main_back_listener")
 
         content = LinearLayout(activity)
         content.setOrientation(LinearLayout.VERTICAL)
@@ -1486,10 +1529,6 @@ class Plugin(BasePlugin):
         top.addView(self._top_button(activity, "Лента", lambda: self._set_mode("feed")))
         top.addView(self._spacer_h(activity, 8))
         top.addView(self._top_button(activity, "Подписки", lambda: self._set_mode("subs")))
-        top.addView(self._spacer_h(activity, 8))
-        top.addView(self._top_button(activity, "Импорт", lambda: self._open_add_feed_screen(fragment)))
-        top.addView(self._spacer_h(activity, 8))
-        top.addView(self._top_button(activity, "Обновить", lambda: (set_refreshing(True), self._refresh_async())))
         top.addView(self._spacer_h(activity, 8))
         top.addView(self._top_button(activity, "Закрыть", lambda: self._close(animated=True)))
 
@@ -1517,7 +1556,7 @@ class Plugin(BasePlugin):
         refresh_bar.addView(pb, LinearLayout.LayoutParams(_dp(18), _dp(18)))
 
         txt = TextView(activity)
-        txt.setText("Обновление… (потяни вниз сверху)")
+        txt.setText("Обновление… ")
         txt.setTextSize(13)
         txt.setTextColor(_c("#FFFFFFFF"))
         txt.setAlpha(0.85)
@@ -1556,43 +1595,45 @@ class Plugin(BasePlugin):
         sv.addView(list_container)
 
         self._main_scroll = sv
+        self._overlay = overlay
+        self._content = content
+        self._list_container = list_container
+        self._mode = "feed"
 
         # --- pull-to-refresh без androidx ---
-        def set_refreshing(val: bool):
-            self._refreshing = bool(val)
-            try:
-                if self._refresh_bar is not None:
-                    self._refresh_bar.setVisibility(View.VISIBLE if self._refreshing else View.GONE)
-            except Exception:
-                pass
-
         def start_refresh_from_pull():
             if self._refreshing:
                 return
-            set_refreshing(True)
+            log("[RSS] pull refresh triggered")
+            self._set_refreshing_ui(True)
             self._refresh_async()
 
         def on_touch(_v, ev):
             try:
-                # если не в режиме ленты — не мешаем (подписки тоже можно, но пусть будет только feed)
-                # if self._mode != "feed":
-                #     return False
+                if self._mode != "feed":
+                    return False
 
                 # не триггерим во время обновления
                 if self._refreshing:
                     return False
 
                 # важно: тянем только когда ScrollView уже в самом верху
-                at_top = (sv.getScrollY() <= 0)
+                try:
+                    at_top = (not bool(sv.canScrollVertically(-1)))
+                except Exception:
+                    at_top = (sv.getScrollY() <= 0)
 
-                act = ev.getAction()
+                try:
+                    act = int(ev.getActionMasked())
+                except Exception:
+                    act = int(ev.getAction())
 
-                if act == 0:  # ACTION_DOWN
+                if act == MotionEvent.ACTION_DOWN:
                     self._pull_start_y = float(ev.getY())
                     self._pull_armed = at_top
                     return False
 
-                if act == 2:  # ACTION_MOVE
+                if act == MotionEvent.ACTION_MOVE:
                     if not self._pull_armed:
                         return False
                     if not at_top:
@@ -1602,7 +1643,7 @@ class Plugin(BasePlugin):
                     dy = float(ev.getY()) - float(self._pull_start_y)
 
                     # порог "как в браузере": потянул заметно вниз
-                    if dy > float(_dp(90)):
+                    if dy > float(_dp(64)):
                         # чтобы не срабатывало 10 раз подряд
                         self._pull_armed = False
                         try:
@@ -1614,7 +1655,7 @@ class Plugin(BasePlugin):
 
                     return False
 
-                if act in (1, 3):  # ACTION_UP / ACTION_CANCEL
+                if act in (MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL):
                     self._pull_armed = False
                     return False
 
@@ -1623,15 +1664,14 @@ class Plugin(BasePlugin):
 
             return False
 
-        sv.setOnTouchListener(dynamic_proxy(
-            "android.view.View$OnTouchListener",
-            {"onTouch": on_touch}
-        ))
-
-        self._overlay = overlay
-        self._content = content
-        self._list_container = list_container
-        self._mode = "feed"
+        try:
+            listener = _OnTouchListener(on_touch)
+            self._main_touch_listener = listener
+            sv.setOnTouchListener(listener)
+            log("[RSS] pull-to-refresh enabled")
+        except Exception as e:
+            self._main_touch_listener = None
+            log(f"[RSS] pull-to-refresh disabled: {e}")
 
         self._render()
 
@@ -1652,7 +1692,7 @@ class Plugin(BasePlugin):
 
 
         if self.get_setting("auto_refresh", True):
-            set_refreshing(True)
+            self._set_refreshing_ui(True)
             self._refresh_async()
         self._render()
 
@@ -1672,6 +1712,8 @@ class Plugin(BasePlugin):
             self._overlay = None
             self._content = None
             self._list_container = None
+            self._main_touch_listener = None
+            self._main_back_listener = None
 
         if not animated or content is None:
             detach()
@@ -1688,8 +1730,29 @@ class Plugin(BasePlugin):
             run_on_ui_thread(detach)
 
     def _set_mode(self, mode: str):
+        if mode == self._mode:
+            return
         self._mode = mode
+        container = self._list_container
+        if container is None:
+            self._render()
+            return
+        try:
+            container.animate().cancel()
+        except Exception:
+            pass
         self._render()
+        try:
+            container.setAlpha(0.0)
+            container.setTranslationY(float(_dp(8)))
+            anim_in = container.animate().alpha(1.0).translationY(0.0).setDuration(170)
+            try:
+                anim_in.setInterpolator(DecelerateInterpolator())
+            except Exception:
+                pass
+            anim_in.start()
+        except Exception:
+            pass
 
     # ---------- Add feed screen ----------
     def _open_add_feed_screen(self, fragment):
@@ -1745,8 +1808,6 @@ class Plugin(BasePlugin):
         title.setTextColor(_c("#FFFFFFFF"))
         top.addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
 
-        top.addView(self._top_button(activity, "Импорт", lambda: None))
-
         sp = View(activity)
         sp.setLayoutParams(LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, _dp(18)))
         content.addView(sp)
@@ -1791,6 +1852,7 @@ class Plugin(BasePlugin):
         self._add_overlay = overlay
         self._add_content = content
         decor.addView(overlay)
+        self._bind_back_handler(overlay, lambda: self._close_add_feed_screen(animated=True), "_add_back_listener")
 
         try:
             overlay.setAlpha(0.0)
@@ -1841,6 +1903,7 @@ class Plugin(BasePlugin):
                 pass
             self._add_overlay = None
             self._add_content = None
+            self._add_back_listener = None
 
         if not animated or content is None:
             detach()
@@ -2014,6 +2077,7 @@ class Plugin(BasePlugin):
         self._post_overlay = overlay
         self._post_content = content
         decor.addView(overlay)
+        self._bind_back_handler(overlay, lambda: self._close_post_screen(animated=True), "_post_back_listener")
         content.addView(sv)
 
         try:
@@ -2044,6 +2108,7 @@ class Plugin(BasePlugin):
                 pass
             self._post_overlay = None
             self._post_content = None
+            self._post_back_listener = None
 
         if not animated or content is None:
             detach()
@@ -2147,6 +2212,7 @@ class Plugin(BasePlugin):
         self._img_overlay = overlay
         self._img_content = content
         decor.addView(overlay)
+        self._bind_back_handler(overlay, lambda: self._close_image_screen(animated=True), "_img_back_listener")
 
         try:
             overlay.setAlpha(0.0)
@@ -2176,6 +2242,7 @@ class Plugin(BasePlugin):
                 pass
             self._img_overlay = None
             self._img_content = None
+            self._img_back_listener = None
 
         if not animated or content is None:
             detach()
@@ -2263,7 +2330,7 @@ class Plugin(BasePlugin):
         log(f"[RSS] render_feed cache_items={len(items)} mode={self._mode}")
         if not items:
             t = TextView(ctx)
-            t.setText("Лента пустая.\nНажми «Импорт» чтобы добавить RSS или @username, затем «Обновить».")
+            t.setText("Лента пустая.\nОткрой «Подписки» и нажми «+», затем потяни ленту вниз для обновления.")
             t.setTextSize(14)
             t.setTextColor(_c("#FFFFFFFF"))
             t.setAlpha(0.75)
@@ -2372,37 +2439,42 @@ class Plugin(BasePlugin):
 
         if not subs:
             t = TextView(ctx)
-            t.setText("Подписок нет.\nНажми «Импорт» и вставь RSS или @username.")
+            t.setText("Подписок нет.\nНажми «+» и вставь RSS или @username.")
             t.setTextSize(14)
             t.setTextColor(_c("#FFFFFFFF"))
             t.setAlpha(0.75)
             self._list_container.addView(t)
-            return
+        else:
+            for i, sub in enumerate(subs, start=1):
+                row = LinearLayout(ctx)
+                row.setOrientation(LinearLayout.HORIZONTAL)
+                row.setGravity(Gravity.CENTER_VERTICAL)
+                row.setPadding(0, _dp(10), 0, _dp(10))
+                self._list_container.addView(row)
 
-        for i, sub in enumerate(subs, start=1):
-            row = LinearLayout(ctx)
-            row.setOrientation(LinearLayout.HORIZONTAL)
-            row.setGravity(Gravity.CENTER_VERTICAL)
-            row.setPadding(0, _dp(10), 0, _dp(10))
-            self._list_container.addView(row)
+                show = ("@" + sub.split(":", 1)[1]) if sub.startswith("tguser:") else sub
 
-            show = ("@" + sub.split(":", 1)[1]) if sub.startswith("tguser:") else sub
+                tv = TextView(ctx)
+                tv.setText(show)
+                tv.setTextSize(14)
+                tv.setTextColor(_c("#FFFFFFFF"))
+                tv.setAlpha(0.92)
+                row.addView(tv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
 
-            tv = TextView(ctx)
-            tv.setText(show)
-            tv.setTextSize(14)
-            tv.setTextColor(_c("#FFFFFFFF"))
-            tv.setAlpha(0.92)
-            row.addView(tv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
+                delb = self._top_button(ctx, "—", lambda idx=i: self._remove_sub_by_index(idx))
+                row.addView(self._spacer_h(ctx, 8))
+                row.addView(delb)
 
-            delb = self._top_button(ctx, "—", lambda idx=i: self._remove_sub_by_index(idx))
-            row.addView(self._spacer_h(ctx, 8))
-            row.addView(delb)
+                div = View(ctx)
+                div.setLayoutParams(LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, _dp(1)))
+                div.setBackgroundColor(_c("#22FFFFFF", "#22000000"))
+                self._list_container.addView(div)
 
-            div = View(ctx)
-            div.setLayoutParams(LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, _dp(1)))
-            div.setBackgroundColor(_c("#22FFFFFF", "#22000000"))
-            self._list_container.addView(div)
+        plus_btn = self._primary_button(ctx, "+", lambda: self._open_add_feed_screen(get_last_fragment()))
+        lp_plus = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp_plus.topMargin = _dp(14)
+        lp_plus.bottomMargin = _dp(4)
+        self._list_container.addView(plus_btn, lp_plus)
 
     def _remove_sub_by_index(self, idx_1based: int):
         subs = self._get_subs()
