@@ -1954,6 +1954,15 @@ class Plugin(BasePlugin):
         except Exception:
             return 0
 
+    def _nav_button_for_mode(self, mode: str):
+        if mode == "feed":
+            return self._nav_feed_btn
+        if mode == "cats":
+            return self._nav_cats_btn
+        if mode == "subs":
+            return self._nav_subs_btn
+        return None
+
     def _switch_mode_by_swipe(self, dx: float):
         order = self._mode_order()
         cur = self._mode_index(self._mode)
@@ -1968,34 +1977,86 @@ class Plugin(BasePlugin):
             pass
         self._set_mode(order[nxt])
 
+    def _preview_bottom_nav_indicator(self, dx: float):
+        row = self._bottom_nav_row
+        ind = self._bottom_nav_indicator
+        if row is None or ind is None:
+            return
+
+        order = self._mode_order()
+        cur_idx = self._mode_index(self._mode)
+        if cur_idx < 0 or cur_idx >= len(order):
+            return
+
+        cur_btn = self._nav_button_for_mode(order[cur_idx])
+        if cur_btn is None:
+            return
+
+        try:
+            cur_left = float(cur_btn.getLeft() or 0.0)
+            cur_w = float(max(1, int(cur_btn.getWidth() or 1)))
+        except Exception:
+            return
+        if cur_w <= 1.0:
+            self._update_bottom_nav_indicator(animated=False)
+            return
+
+        nxt_idx = cur_idx + (1 if float(dx) < 0.0 else -1)
+        if nxt_idx < 0 or nxt_idx >= len(order):
+            # На краях делаем только лёгкий "упругий" сдвиг.
+            p = min(1.0, abs(float(dx)) / float(max(1, _dp(72))))
+            target_left = cur_left + (8.0 if float(dx) < 0.0 else -8.0) * p
+            target_w = cur_w
+        else:
+            nxt_btn = self._nav_button_for_mode(order[nxt_idx])
+            if nxt_btn is None:
+                return
+            try:
+                nxt_left = float(nxt_btn.getLeft() or 0.0)
+                nxt_w = float(max(1, int(nxt_btn.getWidth() or 1)))
+            except Exception:
+                return
+            p = min(1.0, abs(float(dx)) / float(max(1, _dp(72))))
+            target_left = cur_left + (nxt_left - cur_left) * p
+            target_w = cur_w + (nxt_w - cur_w) * p
+
+        try:
+            lp = ind.getLayoutParams()
+            if lp is not None:
+                want_w = max(1, int(target_w))
+                if int(lp.width or 0) != want_w:
+                    lp.width = want_w
+                    ind.setLayoutParams(lp)
+            ind.setTranslationX(float(target_left))
+        except Exception:
+            pass
+
     def _preview_page_swipe(self, dx: float):
         try:
             cont = self._list_container
             if cont is not None:
-                shift = max(-float(_dp(90)), min(float(_dp(90)), float(dx) * 0.55))
+                shift = max(-float(_dp(64)), min(float(_dp(64)), float(dx) * 0.42))
                 cont.setTranslationX(shift)
         except Exception:
             pass
         try:
-            row = self._bottom_nav_row
-            ind = self._bottom_nav_indicator
-            if row is None or ind is None:
-                return
-            w = int(row.getWidth() or 0)
-            total = len(self._mode_order())
-            if w <= 0 or total <= 0:
-                return
-            seg = float(w) / float(total)
-            base = float(self._mode_index(self._mode)) * seg
-            target = max(0.0, min(seg * float(total - 1), base + float(-dx) * 0.35))
-            ind.setTranslationX(target)
+            self._preview_bottom_nav_indicator(dx)
         except Exception:
             pass
 
     def _finish_page_swipe_preview(self):
         try:
-            if self._list_container is not None:
-                self._list_container.animate().translationX(0.0).setDuration(140).start()
+            cont = self._list_container
+            if cont is not None:
+                if abs(float(cont.getTranslationX())) < 0.5:
+                    cont.setTranslationX(0.0)
+                else:
+                    anim = cont.animate().translationX(0.0).setDuration(130)
+                    try:
+                        anim.setInterpolator(DecelerateInterpolator())
+                    except Exception:
+                        pass
+                    anim.start()
         except Exception:
             pass
         try:
@@ -2008,28 +2069,27 @@ class Plugin(BasePlugin):
         ind = self._bottom_nav_indicator
         if row is None or ind is None:
             return
-        idx = self._mode_index(self._mode)
-        total = len(self._mode_order())
 
         def apply():
             try:
-                w = int(row.getWidth() or 0)
-                if w <= 0 or total <= 0:
+                btn = self._nav_button_for_mode(self._mode)
+                if btn is None:
                     return
-                seg = max(1, int(w / total))
+                left = float(btn.getLeft() or 0.0)
+                w = max(1, int(btn.getWidth() or 1))
                 lp = ind.getLayoutParams()
-                if lp is not None:
+                if lp is not None and int(lp.width or 0) != w:
+                    lp.width = w
+                    ind.setLayoutParams(lp)
+                if animated:
+                    anim = ind.animate().translationX(left).setDuration(170)
                     try:
-                        if int(lp.width or 0) != seg:
-                            lp.width = seg
-                            ind.setLayoutParams(lp)
+                        anim.setInterpolator(DecelerateInterpolator())
                     except Exception:
                         pass
-                tx = float(seg * idx)
-                if animated:
-                    ind.animate().translationX(tx).setDuration(170).start()
+                    anim.start()
                 else:
-                    ind.setTranslationX(tx)
+                    ind.setTranslationX(left)
             except Exception:
                 pass
 
@@ -2052,20 +2112,30 @@ class Plugin(BasePlugin):
                 self._gesture_start_x = float(ev.getX())
                 self._gesture_start_y = float(ev.getY())
                 self._gesture_switched = False
+                self._gesture_dragging = False
                 return False
 
             if act == MotionEvent.ACTION_MOVE:
                 dx = float(ev.getX()) - float(self._gesture_start_x)
                 dy = float(ev.getY()) - float(self._gesture_start_y)
+                if (not self._gesture_dragging) and (abs(dx) > float(_dp(14))) and (abs(dx) > abs(dy) * 1.05):
+                    self._gesture_dragging = True
+                if self._gesture_dragging and (not self._gesture_switched):
+                    self._preview_page_swipe(dx)
                 if (not self._gesture_switched) and (abs(dx) > float(_dp(72))) and (abs(dx) > abs(dy) * 1.2):
                     self._gesture_switched = True
                     self._switch_mode_by_swipe(dx)
+                    self._gesture_dragging = False
+                    self._finish_page_swipe_preview()
                     return True
-                return bool(self._gesture_switched)
+                return bool(self._gesture_switched or self._gesture_dragging)
 
             if act in (MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL):
-                consumed = bool(self._gesture_switched)
+                consumed = bool(self._gesture_switched or self._gesture_dragging)
+                if self._gesture_dragging and (not self._gesture_switched):
+                    self._finish_page_swipe_preview()
                 self._gesture_switched = False
+                self._gesture_dragging = False
                 return consumed
         except Exception:
             return False
@@ -2089,6 +2159,7 @@ class Plugin(BasePlugin):
             self._nav_feed_btn.setBackground(self._bg_pill("#2AFFFFFF" if is_feed else "#00000000"))
             self._nav_subs_btn.setBackground(self._bg_pill("#2AFFFFFF" if is_subs else "#00000000"))
             self._nav_cats_btn.setBackground(self._bg_pill("#2AFFFFFF" if is_cats else "#00000000"))
+            self._update_bottom_nav_indicator(animated=True)
         except Exception:
             pass
 
@@ -2257,6 +2328,7 @@ class Plugin(BasePlugin):
         self._nav_feed_btn = nav_feed
         self._nav_cats_btn = nav_cats
         self._nav_subs_btn = nav_subs
+        self._bottom_nav_row = bottom_nav
 
         lp_feed = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0)
         lp_cats = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0)
@@ -2267,19 +2339,38 @@ class Plugin(BasePlugin):
         bottom_nav.addView(nav_feed, lp_feed)
         bottom_nav.addView(nav_cats, lp_cats)
         bottom_nav.addView(nav_subs, lp_subs)
+
+        indicator_track = FrameLayout(activity)
+        indicator_track.setBackground(self._bg_pill("#08FFFFFF"))
+        lp_track = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, _dp(4))
+        lp_track.topMargin = _dp(5)
+        content.addView(indicator_track, lp_track)
+
+        indicator = View(activity)
+        indicator.setBackground(self._bg_pill("#7AFFFFFF"))
+        indicator_track.addView(indicator, FrameLayout.LayoutParams(1, ViewGroup.LayoutParams.MATCH_PARENT))
+        self._bottom_nav_indicator = indicator
+
         try:
             bottom_nav.setAlpha(1.0)
             bottom_nav.setTranslationY(float(_dp(14)))
+            indicator_track.setAlpha(1.0)
+            indicator_track.setTranslationY(float(_dp(14)))
             nav_anim = bottom_nav.animate().translationY(0.0).setDuration(180)
+            track_anim = indicator_track.animate().translationY(0.0).setDuration(180)
             try:
                 nav_anim.setStartDelay(80)
+                track_anim.setStartDelay(80)
             except Exception:
                 pass
             nav_anim.start()
+            track_anim.start()
         except Exception:
             try:
                 bottom_nav.setAlpha(1.0)
                 bottom_nav.setTranslationY(0.0)
+                indicator_track.setAlpha(1.0)
+                indicator_track.setTranslationY(0.0)
             except Exception:
                 pass
 
@@ -2289,6 +2380,7 @@ class Plugin(BasePlugin):
         self._list_container = list_container
         self._mode = "feed"
         self._update_bottom_nav_state()
+        self._update_bottom_nav_indicator(animated=False)
 
         # --- pull-to-refresh без androidx ---
         def start_refresh_from_pull():
@@ -2309,6 +2401,7 @@ class Plugin(BasePlugin):
                     self._gesture_start_x = float(ev.getX())
                     self._gesture_start_y = float(ev.getY())
                     self._gesture_switched = False
+                    self._gesture_dragging = False
                     self._pull_start_y = float(ev.getY())
                     try:
                         at_top = (not bool(sv.canScrollVertically(-1)))
@@ -2321,11 +2414,20 @@ class Plugin(BasePlugin):
                     dx = float(ev.getX()) - float(self._gesture_start_x)
                     dy_total = float(ev.getY()) - float(self._gesture_start_y)
 
+                    if (not self._gesture_dragging) and (abs(dx) > float(_dp(14))) and (abs(dx) > abs(dy_total) * 1.05):
+                        self._gesture_dragging = True
+                    if self._gesture_dragging and (not self._gesture_switched):
+                        self._preview_page_swipe(dx)
+
                     # свайп влево/вправо по ленте -> переключение нижних вкладок
                     if (not self._gesture_switched) and (abs(dx) > float(_dp(72))) and (abs(dx) > abs(dy_total) * 1.2):
                         self._gesture_switched = True
                         self._pull_armed = False
                         self._switch_mode_by_swipe(dx)
+                        self._gesture_dragging = False
+                        self._finish_page_swipe_preview()
+                        return True
+                    if self._gesture_dragging and (abs(dx) > abs(dy_total)):
                         return True
 
                     if self._mode not in ("feed", "cats"):
@@ -2365,9 +2467,13 @@ class Plugin(BasePlugin):
                     return False
 
                 if act in (MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL):
+                    consumed = bool(self._gesture_switched or self._gesture_dragging)
                     self._pull_armed = False
+                    if self._gesture_dragging and (not self._gesture_switched):
+                        self._finish_page_swipe_preview()
                     self._gesture_switched = False
-                    return False
+                    self._gesture_dragging = False
+                    return consumed
 
             except Exception:
                 return False
@@ -2462,6 +2568,10 @@ class Plugin(BasePlugin):
         if container is None:
             self._render()
             return
+        try:
+            container.setTranslationX(0.0)
+        except Exception:
+            pass
         try:
             container.animate().cancel()
         except Exception:
