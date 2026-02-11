@@ -1344,7 +1344,7 @@ class Plugin(BasePlugin):
         self._gesture_dragging = False
         self._animate_list_once = False
         self._feed_item_touch_listener = None
-        self._ui_scale = _clamp_ui_scale(self.get_setting("ui_scale", "1.00"))
+        self._ui_scale = _clamp_ui_scale(self.get_setting("rss_ui_scale", "1.00"))
         global _UI_SCALE
         _UI_SCALE = float(self._ui_scale)
         self._ui_seek_listener = None
@@ -1417,7 +1417,7 @@ class Plugin(BasePlugin):
         _UI_SCALE = float(val)
         if persist:
             try:
-                self.set_setting("ui_scale", f"{val:.2f}")
+                self.set_setting("rss_ui_scale", f"{val:.2f}")
             except Exception:
                 pass
 
@@ -2197,6 +2197,14 @@ class Plugin(BasePlugin):
     # ---------- MAIN SCREEN ----------
     def _open(self, fragment):
         log("[RSS] _open: start")
+        # перечитываем ui_scale из хранилища при каждом открытии
+        try:
+            stored = self.get_setting("rss_ui_scale", "1.00")
+            self._ui_scale = _clamp_ui_scale(stored)
+            global _UI_SCALE
+            _UI_SCALE = float(self._ui_scale)
+        except Exception:
+            pass
         if self._overlay is not None:
             log("[RSS] _open: already opened")
             return
