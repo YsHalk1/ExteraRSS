@@ -16,10 +16,11 @@ from org.telegram.messenger import AndroidUtilities
 
 from android.graphics import Color
 from android.graphics import BitmapFactory
+from android.graphics import Typeface
 from android.graphics.drawable import GradientDrawable
 from android.view import Gravity, View, ViewGroup, ViewOutlineProvider
 from android.view import HapticFeedbackConstants
-from android.view.animation import DecelerateInterpolator
+from android.view.animation import DecelerateInterpolator, AccelerateDecelerateInterpolator, OvershootInterpolator
 
 from android.widget import FrameLayout, LinearLayout, ScrollView, TextView, ImageView, EditText
 from android.content import Intent
@@ -59,12 +60,15 @@ __id__ = "ExteraRSS"
 __name__ = "ExteraRSS"
 __description__ = "RSS + Telegram в одной ленте."
 __author__ = "@RoflPlugins"
-__version__ = "1.4.5"
+__version__ = "1.5.0"
 __icon__ = "msg_list"
 __min_version__ = "11.12.0"
 
 # ---- UI tuning ----
 CORNER_RADIUS_DP = 10
+_ANIM_DURATION_FAST = 120
+_ANIM_DURATION_NORMAL = 200
+_ANIM_DURATION_SLOW = 280
 
 
 # ---------------- safe color ----------------
@@ -1153,6 +1157,10 @@ class Plugin(BasePlugin):
         self._nav_feed_btn: Optional[TextView] = None
         self._nav_subs_btn: Optional[TextView] = None
         self._nav_cats_btn: Optional[TextView] = None
+        self._hint_tv: Optional[TextView] = None
+        self._gesture_start_x = 0.0
+        self._gesture_start_y = 0.0
+        self._gesture_switched = False
 
     # ---- UI rounding ----
     def _corner_radius_px(self) -> int:
@@ -1173,6 +1181,18 @@ class Plugin(BasePlugin):
         if stroke_dp and stroke_dp > 0:
             bg.setStroke(_dp(stroke_dp), _c(stroke_hex, "#00000000"))
         return bg
+
+    def _bg_important_gradient(self):
+        try:
+            bg = GradientDrawable(
+                GradientDrawable.Orientation.LEFT_RIGHT,
+                [_c("#FF1E1E24"), _c("#6EFFFFFF")]
+            )
+            bg.setCornerRadius(float(self._corner_radius_px()))
+            bg.setStroke(0, _c("#22FFFFFF"))
+            return bg
+        except Exception:
+            return self._bg_rounded("#FF1E1E24", "#22FFFFFF", 0.0)
 
     def _apply_rounded_clip(self, v: View):
         try:
@@ -1380,6 +1400,22 @@ class Plugin(BasePlugin):
         try:
             if self._refresh_bar is not None:
                 self._refresh_bar.setVisibility(View.VISIBLE if self._refreshing else View.GONE)
+        except Exception:
+            pass
+
+    def _update_hint_text(self):
+        try:
+            if self._hint_tv is None:
+                return
+            cache_ts = self.get_setting("rss_cache_ts", "0")
+            ts = int(cache_ts or 0)
+            items = self._get_cache()
+            count = len(items)
+            time_str = _format_ru_datetime(ts) if ts else "—"
+            if count > 0:
+                self._hint_tv.setText(f"ExteraRSS • {count} записей • обновлено: {time_str}")
+            else:
+                self._hint_tv.setText("ExteraRSS By @RoflPlugins")
         except Exception:
             pass
 
@@ -1678,10 +1714,16 @@ class Plugin(BasePlugin):
                     self._refresh_now()
             finally:
                 def ui():
-                    # ✅ всегда сбрасываем индикатор
                     self._set_refreshing_ui(False)
                     self._render()
                     self._update_source_button()
+                    self._update_hint_text()
+                    try:
+                        sv = self._main_scroll
+                        if sv is not None and self._mode in ("feed", "cats"):
+                            sv.fullScroll(View.FOCUS_UP)
+                    except Exception:
+                        pass
                 run_on_ui_thread(ui)
 
         threading.Thread(target=bg, daemon=True).start()
@@ -1694,14 +1736,17 @@ class Plugin(BasePlugin):
         row.setBackground(self._bg_rounded("#141AFFFFFF"))
 
         bar = View(ctx)
-        bar.setBackgroundColor(_c("#FFFFF0FF"))
-        row.addView(bar, LinearLayout.LayoutParams(_dp(3), ViewGroup.LayoutParams.MATCH_PARENT))
+        gd = GradientDrawable()
+        gd.setColor(_c("#FFFFF0FF"))
+        gd.setCornerRadii([float(_dp(99)), float(_dp(99)), 0.0, 0.0, 0.0, 0.0, float(_dp(99)), float(_dp(99))])
+        bar.setBackground(gd)
+        row.addView(bar, LinearLayout.LayoutParams(_dp(3.5), ViewGroup.LayoutParams.MATCH_PARENT))
 
         tv = TextView(ctx)
         tv.setText(reply_text)
         tv.setTextSize(13)
         tv.setTextColor(_c("#FFFFFFFF"))
-        tv.setAlpha(0.55)
+        tv.setAlpha(0.64)
         tv.setSingleLine(False)
 
         lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0)
@@ -1777,11 +1822,12 @@ class Plugin(BasePlugin):
                 pass
             try:
                 v.animate().cancel()
-                v.animate().scaleX(0.96).scaleY(0.96).setDuration(70).start()
-                AndroidUtilities.runOnUIThread(
-                    Runnable(lambda: v.animate().scaleX(1.0).scaleY(1.0).setDuration(120).start()),
-                    75
-                )
+                def _restore():
+                    try:
+                        v.animate().scaleX(1.0).scaleY(1.0).setDuration(_ANIM_DURATION_NORMAL).setInterpolator(OvershootInterpolator(1.1)).start()
+                    except Exception:
+                        pass
+                v.animate().scaleX(0.94).scaleY(0.94).setDuration(70).withEndAction(Runnable(_restore)).start()
             except Exception:
                 pass
             try:
@@ -1812,17 +1858,22 @@ class Plugin(BasePlugin):
 
     def _animate_entry(self, v: View, idx: int = 0):
         try:
-            delay = int(min(max(idx, 0), 10) * 22)
+            delay = int(min(max(idx, 0), 14) * 18)
             v.setAlpha(0.0)
-            v.setTranslationY(float(_dp(10)))
+            v.setTranslationY(float(_dp(14)))
+            v.setScaleX(0.96)
+            v.setScaleY(0.96)
 
             def run():
                 try:
-                    anim = v.animate().alpha(1.0).translationY(0.0).setDuration(180)
+                    anim = v.animate().alpha(1.0).translationY(0.0).scaleX(1.0).scaleY(1.0).setDuration(_ANIM_DURATION_NORMAL)
                     try:
-                        anim.setInterpolator(DecelerateInterpolator())
+                        anim.setInterpolator(OvershootInterpolator(1.2))
                     except Exception:
-                        pass
+                        try:
+                            anim.setInterpolator(DecelerateInterpolator())
+                        except Exception:
+                            pass
                     anim.start()
                 except Exception:
                     pass
@@ -1899,13 +1950,13 @@ class Plugin(BasePlugin):
         top.addView(self._spacer_h(activity, 8))
         top.addView(self._top_button(activity, "Закрыть", lambda: self._close(animated=True)))
 
-        hint = TextView(activity)
-        hint.setText("ExteraRSS By @RoflPlugins")
-        hint.setTextSize(12)
-        hint.setTextColor(_c("#FFFFFFFF"))
-        hint.setAlpha(0.65)
-        hint.setPadding(0, _dp(6), 0, _dp(10))
-        content.addView(hint)
+        self._hint_tv = TextView(activity)
+        self._hint_tv.setText("ExteraRSS By @RoflPlugins")
+        self._hint_tv.setTextSize(12)
+        self._hint_tv.setTextColor(_c("#FFFFFFFF"))
+        self._hint_tv.setAlpha(0.65)
+        self._hint_tv.setPadding(0, _dp(6), 0, _dp(10))
+        content.addView(self._hint_tv)
 
         # --- refresh bar (показывается во время обновления) ---
         refresh_bar = LinearLayout(activity)
@@ -2004,7 +2055,9 @@ class Plugin(BasePlugin):
         self._mode = "feed"
         self._update_bottom_nav_state()
 
-        # --- pull-to-refresh без androidx ---
+        # --- pull-to-refresh + swipe между вкладками ---
+        _MODE_ORDER = ["feed", "cats", "subs"]
+
         def start_refresh_from_pull():
             if self._refreshing:
                 return
@@ -2012,43 +2065,71 @@ class Plugin(BasePlugin):
             self._set_refreshing_ui(True)
             self._refresh_async()
 
+        def _mode_index(m):
+            try:
+                return _MODE_ORDER.index(m)
+            except Exception:
+                return 0
+
+        def _switch_tab_by_swipe(dx):
+            cur = _mode_index(self._mode)
+            step = 1 if float(dx) < 0 else -1
+            nxt = max(0, min(len(_MODE_ORDER) - 1, cur + step))
+            if nxt != cur:
+                try:
+                    sv.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                except Exception:
+                    pass
+                self._set_mode(_MODE_ORDER[nxt])
+
         def on_touch(_v, ev):
             try:
-                if self._mode != "feed":
-                    return False
-
-                # не триггерим во время обновления
-                if self._refreshing:
-                    return False
-
-                # важно: тянем только когда ScrollView уже в самом верху
-                try:
-                    at_top = (not bool(sv.canScrollVertically(-1)))
-                except Exception:
-                    at_top = (sv.getScrollY() <= 0)
-
                 try:
                     act = int(ev.getActionMasked())
                 except Exception:
                     act = int(ev.getAction())
 
                 if act == MotionEvent.ACTION_DOWN:
+                    self._gesture_start_x = float(ev.getX())
+                    self._gesture_start_y = float(ev.getY())
+                    self._gesture_switched = False
+                    try:
+                        at_top = (not bool(sv.canScrollVertically(-1)))
+                    except Exception:
+                        at_top = (sv.getScrollY() <= 0)
                     self._pull_start_y = float(ev.getY())
-                    self._pull_armed = at_top
+                    self._pull_armed = (self._mode in ("feed", "cats") and (not self._refreshing) and at_top)
                     return False
 
                 if act == MotionEvent.ACTION_MOVE:
+                    dx = float(ev.getX()) - float(self._gesture_start_x)
+                    dy_total = float(ev.getY()) - float(self._gesture_start_y)
+
+                    # свайп влево/вправо -> переключение вкладок
+                    if (not self._gesture_switched) and (abs(dx) > float(_dp(72))) and (abs(dx) > abs(dy_total) * 1.2):
+                        self._gesture_switched = True
+                        self._pull_armed = False
+                        _switch_tab_by_swipe(dx)
+                        return True
+
+                    if self._mode not in ("feed", "cats"):
+                        return False
+                    if self._refreshing:
+                        return False
                     if not self._pull_armed:
                         return False
+                    try:
+                        at_top = (not bool(sv.canScrollVertically(-1)))
+                    except Exception:
+                        at_top = (sv.getScrollY() <= 0)
                     if not at_top:
                         self._pull_armed = False
                         return False
 
                     dy = float(ev.getY()) - float(self._pull_start_y)
-
-                    # порог "как в браузере": потянул заметно вниз
+                    if abs(dx) > abs(dy):
+                        return False
                     if dy > float(_dp(64)):
-                        # чтобы не срабатывало 10 раз подряд
                         self._pull_armed = False
                         try:
                             sv.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
@@ -2061,6 +2142,7 @@ class Plugin(BasePlugin):
 
                 if act in (MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL):
                     self._pull_armed = False
+                    self._gesture_switched = False
                     return False
 
             except Exception:
@@ -2083,9 +2165,11 @@ class Plugin(BasePlugin):
 
         try:
             overlay.setAlpha(0.0)
-            content.setTranslationY(float(_dp(16)))
-            overlay.animate().alpha(1.0).setDuration(160).start()
-            anim = content.animate().translationY(0.0).setDuration(220)
+            content.setTranslationY(float(_dp(20)))
+            content.setScaleX(0.98)
+            content.setScaleY(0.98)
+            overlay.animate().alpha(1.0).setDuration(_ANIM_DURATION_NORMAL).setInterpolator(AccelerateDecelerateInterpolator()).start()
+            anim = content.animate().translationY(0.0).scaleX(1.0).scaleY(1.0).setDuration(_ANIM_DURATION_SLOW)
             try:
                 anim.setInterpolator(DecelerateInterpolator())
             except Exception:
@@ -2123,6 +2207,8 @@ class Plugin(BasePlugin):
             self._nav_feed_btn = None
             self._nav_cats_btn = None
             self._nav_subs_btn = None
+            self._hint_tv = None
+            self._gesture_switched = False
 
         if not animated or content is None:
             detach()
@@ -2142,7 +2228,10 @@ class Plugin(BasePlugin):
         if mode == self._mode:
             return
         self._close_source_picker_screen(animated=False)
+        _ORDER = ["feed", "cats", "subs"]
+        prev_idx = _ORDER.index(self._mode) if self._mode in _ORDER else 0
         self._mode = mode
+        new_idx = _ORDER.index(mode) if mode in _ORDER else 0
         self._update_source_button()
         self._update_bottom_nav_state()
         container = self._list_container
@@ -2156,9 +2245,11 @@ class Plugin(BasePlugin):
         self._render()
         self._update_bottom_nav_state()
         try:
-            container.setAlpha(0.0)
-            container.setTranslationY(float(_dp(8)))
-            anim_in = container.animate().alpha(1.0).translationY(0.0).setDuration(170)
+            direction = 1 if new_idx > prev_idx else -1
+            container.setAlpha(0.85)
+            container.setTranslationX(float(direction * _dp(18)))
+            container.setTranslationY(0.0)
+            anim_in = container.animate().alpha(1.0).translationX(0.0).setDuration(_ANIM_DURATION_NORMAL)
             try:
                 anim_in.setInterpolator(DecelerateInterpolator())
             except Exception:
@@ -2876,8 +2967,14 @@ class Plugin(BasePlugin):
             try:
                 iv.setImageBitmap(bmp)
                 iv.setVisibility(View.VISIBLE)
+                iv.setAlpha(0.0)
+                iv.animate().alpha(1.0).setDuration(180).setInterpolator(DecelerateInterpolator()).start()
             except Exception:
-                pass
+                try:
+                    iv.setImageBitmap(bmp)
+                    iv.setVisibility(View.VISIBLE)
+                except Exception:
+                    pass
             return
 
         def bg():
@@ -2898,8 +2995,14 @@ class Plugin(BasePlugin):
                     try:
                         iv.setImageBitmap(bmp2)
                         iv.setVisibility(View.VISIBLE)
+                        iv.setAlpha(0.0)
+                        iv.animate().alpha(1.0).setDuration(220).setInterpolator(AccelerateDecelerateInterpolator()).start()
                     except Exception:
-                        pass
+                        try:
+                            iv.setImageBitmap(bmp2)
+                            iv.setVisibility(View.VISIBLE)
+                        except Exception:
+                            pass
                 run_on_ui_thread(ui)
             except Exception:
                 pass
@@ -2913,6 +3016,7 @@ class Plugin(BasePlugin):
         ctx = self._list_container.getContext()
         self._update_source_button()
         self._update_bottom_nav_state()
+        self._update_hint_text()
         try:
             self._list_container.removeAllViews()
         except Exception:
@@ -3006,9 +3110,20 @@ class Plugin(BasePlugin):
             block.setOrientation(LinearLayout.VERTICAL)
             block.setPadding(_dp(10), _dp(10), _dp(10), _dp(10))
             block.setClickable(True)
-            block.setOnClickListener(OnClickListener(lambda _v, item=it: self._open_post_screen(get_last_fragment(), item)))
 
-            block.setBackground(self._bg_rounded("#33FFEB3B" if important else "#141AFFFFFF"))
+            def _on_card_click(v, item=it):
+                try:
+                    v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                except Exception:
+                    pass
+                self._open_post_screen(get_last_fragment(), item)
+
+            block.setOnClickListener(OnClickListener(_on_card_click))
+
+            if important or veryimportant:
+                block.setBackground(self._bg_important_gradient())
+            else:
+                block.setBackground(self._bg_rounded("#141AFFFFFF"))
             lp_block = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             lp_block.bottomMargin = _dp(10)
             self._list_container.addView(block, lp_block)
@@ -3018,8 +3133,9 @@ class Plugin(BasePlugin):
             if title:
                 tv_title = TextView(ctx)
                 tv_title.setText(title)
-                tv_title.setTextSize(16)
-                tv_title.setTextColor(_c("#FFF7E05A" if important else "#FFFFFFFF"))
+                tv_title.setTextSize(32 if veryimportant else (22 if important else 16))
+                tv_title.setTextColor(_c("#FFFF0000" if veryimportant else ("#FFFFFFFF" if important else "#EFEFEFEF")))
+                tv_title.setTypeface(None, Typeface.BOLD)
                 tv_title.setAlpha(0.98)
                 tv_title.setPadding(0, 0, 0, _dp(6))
                 block.addView(tv_title)
