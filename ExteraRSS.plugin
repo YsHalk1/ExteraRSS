@@ -1372,7 +1372,7 @@ class Plugin(BasePlugin):
             bg.setStroke(_dp(0), _c("#22FFFFFF"))
             return bg
         except Exception:
-            return self._bg_rounded("#FF1E1E24", "#22FFFFFF", 1.0)
+            return self._bg_rounded("#FF1E1E24", "#22FFFFFF", 0.0)
 
     def _bg_pill(self, fill_hex: str, stroke_hex: str = "#00000000", stroke_dp: float = 0.0):
         bg = GradientDrawable()
@@ -1824,7 +1824,7 @@ class Plugin(BasePlugin):
         card = LinearLayout(activity)
         card.setOrientation(LinearLayout.VERTICAL)
         card.setPadding(_dp(12), _dp(12), _dp(12), _dp(12))
-        card.setBackground(self._bg_rounded("#FF171A24", "#22FFFFFF", 1.0))
+        card.setBackground(self._bg_rounded("#FF171A24", "#22FFFFFF", 0.0))
         card.setClickable(True)
         lp_card = FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1874,7 +1874,7 @@ class Plugin(BasePlugin):
             lp_btn.bottomMargin = _dp(8)
             col.addView(btn, lp_btn)
 
-        close_btn = self._top_button(activity, " X ", lambda: self._close_source_picker_screen(animated=True))
+        close_btn = self._top_button(activity, " Свернуть ", lambda: self._close_source_picker_screen(animated=True))
         lp_close = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
             ViewGroup.LayoutParams.WRAP_CONTENT
@@ -2457,7 +2457,7 @@ class Plugin(BasePlugin):
         bottom_nav.setOrientation(LinearLayout.HORIZONTAL)
         bottom_nav.setGravity(Gravity.CENTER_VERTICAL)
         bottom_nav.setPadding(_dp(4), _dp(4), _dp(4), _dp(4))
-        bottom_nav.setBackground(self._bg_pill("#1C1AFFFFFF", "#24FFFFFF", 1.0))
+        bottom_nav.setBackground(self._bg_pill("#1C1AFFFFFF", "#24FFFFFF", 0.0))
         lp_nav = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         lp_nav.topMargin = _dp(10)
         content.addView(bottom_nav, lp_nav)
@@ -3701,7 +3701,7 @@ class Plugin(BasePlugin):
         card = LinearLayout(ctx)
         card.setOrientation(LinearLayout.VERTICAL)
         card.setPadding(_dp(12), _dp(12), _dp(12), _dp(12))
-        card.setBackground(self._bg_rounded("#1E1AFFFFFF", "#24FFFFFF", 1.0))
+        card.setBackground(self._bg_rounded("#1E1AFFFFFF", "#24FFFFFF", 0.0))
         lp_card = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         lp_card.bottomMargin = _dp(12)
         self._list_container.addView(card, lp_card)
