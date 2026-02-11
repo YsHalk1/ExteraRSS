@@ -1329,6 +1329,26 @@ class Plugin(BasePlugin):
         except Exception:
             pass
 
+    def _focus_view_safe(self, v: Optional[View]):
+        if v is None:
+            return
+        try:
+            v.setFocusable(True)
+        except Exception:
+            pass
+        try:
+            v.setFocusableInTouchMode(True)
+        except Exception:
+            pass
+        try:
+            v.requestFocus()
+        except Exception:
+            pass
+        try:
+            v.requestFocusFromTouch()
+        except Exception:
+            pass
+
     # ---------- lifecycle ----------
     def on_plugin_load(self):
         self._install_drawer_item()
@@ -1503,27 +1523,68 @@ class Plugin(BasePlugin):
     # ---------- refresh ----------
     def _bind_back_handler(self, overlay: View, close_cb, store_attr: str):
         try:
-            overlay.setFocusable(True)
-            try:
-                overlay.setFocusableInTouchMode(True)
-            except Exception:
-                pass
+            self._focus_view_safe(overlay)
 
             def on_key(_v, key_code, event):
                 try:
                     if int(key_code) != int(KeyEvent.KEYCODE_BACK):
                         return False
                     act = int(event.getAction())
-                    if act == int(KeyEvent.ACTION_UP):
+                    # ACTION_DOWN catches both button back and gesture back reliably.
+                    if act == int(KeyEvent.ACTION_DOWN):
                         close_cb()
-                    return True
+                        return True
+                    if act == int(KeyEvent.ACTION_UP):
+                        return True
+                    return False
                 except Exception:
                     return False
 
-            listener = _OnKeyListener(on_key)
-            overlay.setOnKeyListener(listener)
+            listener = None
             try:
-                overlay.requestFocus()
+                listener = _OnKeyListener(on_key)
+            except Exception:
+                listener = None
+
+            if listener is None:
+                class _LocalOnKeyListener(dynamic_proxy(View.OnKeyListener)):
+                    def __init__(self, fn):
+                        super().__init__()
+                        self._fn = fn
+                    def onKey(self, v, key_code, event):
+                        return bool(self._fn(v, key_code, event))
+                listener = _LocalOnKeyListener(on_key)
+
+            def attach_to_tree(v: View):
+                try:
+                    v.setOnKeyListener(listener)
+                except Exception:
+                    pass
+                if isinstance(v, ViewGroup):
+                    try:
+                        cnt = int(v.getChildCount() or 0)
+                    except Exception:
+                        cnt = 0
+                    for i in range(cnt):
+                        try:
+                            ch = v.getChildAt(i)
+                        except Exception:
+                            ch = None
+                        if ch is not None:
+                            attach_to_tree(ch)
+
+            attach_to_tree(overlay)
+            self._focus_view_safe(overlay)
+
+            def late_bind():
+                try:
+                    attach_to_tree(overlay)
+                    self._focus_view_safe(overlay)
+                except Exception:
+                    pass
+            try:
+                AndroidUtilities.runOnUIThread(Runnable(late_bind), 80)
+                AndroidUtilities.runOnUIThread(Runnable(late_bind), 220)
             except Exception:
                 pass
             setattr(self, store_attr, listener)
@@ -1855,7 +1916,8 @@ class Plugin(BasePlugin):
         row = LinearLayout(ctx)
         row.setOrientation(LinearLayout.HORIZONTAL)
         row.setPadding(_dp(10), _dp(8), _dp(10), _dp(8))
-        row.setBackground(self._bg_rounded("#201AFFFFFF"))  # было #141AFFFFFF
+        # Reply bubble is intentionally darker than the card itself.
+        row.setBackground(self._bg_rounded("#32000000", "#28FFFFFF", 1.0))
 
         bar = View(ctx)
 
@@ -1870,7 +1932,7 @@ class Plugin(BasePlugin):
         tv.setText(reply_text)
         tv.setTextSize(13)
         tv.setTextColor(_c("#FFFFFFFF"))
-        tv.setAlpha(0.55)
+        tv.setAlpha(0.64)
         tv.setSingleLine(False)
 
         lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0)
@@ -2072,6 +2134,7 @@ class Plugin(BasePlugin):
                 self._gesture_start_x = float(ev.getX())
                 self._gesture_start_y = float(ev.getY())
                 self._gesture_switched = False
+                self._focus_view_safe(self._overlay)
                 return False
 
             if act == MotionEvent.ACTION_MOVE:
@@ -2330,6 +2393,7 @@ class Plugin(BasePlugin):
                     self._gesture_start_x = float(ev.getX())
                     self._gesture_start_y = float(ev.getY())
                     self._gesture_switched = False
+                    self._focus_view_safe(self._overlay)
                     self._pull_start_y = float(ev.getY())
                     try:
                         at_top = (not bool(sv.canScrollVertically(-1)))
@@ -2405,6 +2469,7 @@ class Plugin(BasePlugin):
             log(f"[RSS] pull-to-refresh disabled: {e}")
 
         self._render()
+        self._focus_view_safe(overlay)
 
         
 
