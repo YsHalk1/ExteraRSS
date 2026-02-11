@@ -1917,7 +1917,7 @@ class Plugin(BasePlugin):
         row.setOrientation(LinearLayout.HORIZONTAL)
         row.setPadding(_dp(10), _dp(8), _dp(10), _dp(8))
         # Reply bubble is intentionally darker than the card itself.
-        row.setBackground(self._bg_rounded("#32000000", "#28FFFFFF", 1.0))
+        row.setBackground(self._bg_rounded("#32000000", "#28FFFFFF", 0.0))
 
         bar = View(ctx)
 
