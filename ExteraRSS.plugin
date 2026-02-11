@@ -17,6 +17,7 @@ from org.telegram.messenger import AndroidUtilities
 
 from android.graphics import Color
 from android.graphics import BitmapFactory
+from android.graphics import Typeface
 try:
     from android.graphics import Bitmap
 except Exception:
@@ -1305,10 +1306,10 @@ class Plugin(BasePlugin):
         try:
             bg = GradientDrawable(
                 GradientDrawable.Orientation.LEFT_RIGHT,
-                [_c("#FF1E1E24"), _c("#1EFFFFFF")]
+                [_c("#FF1E1E24"), _c("#6EFFFFFF")]
             )
             bg.setCornerRadius(float(self._corner_radius_px()))
-            bg.setStroke(_dp(1), _c("#22FFFFFF"))
+            bg.setStroke(_dp(0), _c("#22FFFFFF"))
             return bg
         except Exception:
             return self._bg_rounded("#FF1E1E24", "#22FFFFFF", 1.0)
@@ -1857,9 +1858,15 @@ class Plugin(BasePlugin):
         row.setBackground(self._bg_rounded("#141AFFFFFF"))
 
         bar = View(ctx)
-        bar.setBackgroundColor(_c("#FFFFF0FF"))
-        row.addView(bar, LinearLayout.LayoutParams(_dp(3), ViewGroup.LayoutParams.MATCH_PARENT))
 
+        gd = GradientDrawable()
+        gd.setColor(_c("#FFFFF0FF"))
+        gd.setCornerRadii([_dp(99),_dp(99), 0,0, 0,0, _dp(99),_dp(99)])  # TL,TR, BR,BL (парами)
+
+        bar.setBackground(gd)
+
+        lp_bar = LinearLayout.LayoutParams(_dp(3.5), ViewGroup.LayoutParams.MATCH_PARENT)
+        row.addView(bar, lp_bar)
         tv = TextView(ctx)
         tv.setText(reply_text)
         tv.setTextSize(13)
@@ -1878,6 +1885,7 @@ class Plugin(BasePlugin):
         b.setText(text)
         b.setTextSize(11)
         b.setTextColor(_c("#FFFFFFFF"))
+        b.setTypeface(None, Typeface.BOLD)
         b.setPadding(_dp(12), _dp(8), _dp(12), _dp(8))
         b.setClickable(True)
         b.setBackground(self._bg_rounded("#1AFFFFFF"))
@@ -1901,6 +1909,7 @@ class Plugin(BasePlugin):
         b.setTextSize(11)
         b.setGravity(Gravity.CENTER)
         b.setTextColor(_c("#FFFFFFFF"))
+        b.setTypeface(None, Typeface.BOLD)
         b.setPadding(_dp(12), _dp(12), _dp(12), _dp(12))
         b.setClickable(True)
         b.setBackground(self._bg_rounded("#22FFFFFF"))
@@ -2195,7 +2204,7 @@ class Plugin(BasePlugin):
         hint.setText("ExteraRSS By @RoflPlugins")
         hint.setTextSize(12)
         hint.setTextColor(_c("#FFFFFFFF"))
-        hint.setAlpha(0.65)
+        hint.setAlpha(0.45)
         hint.setPadding(0, _dp(6), 0, _dp(10))
         content.addView(hint)
 
@@ -2217,6 +2226,7 @@ class Plugin(BasePlugin):
         txt = TextView(activity)
         txt.setText("Обновление… ")
         txt.setTextSize(13)
+        txt.setTypeface(None, Typeface.BOLD)
         txt.setTextColor(_c("#FFFFFFFF"))
         txt.setAlpha(0.85)
         lp_txt = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
@@ -2536,6 +2546,7 @@ class Plugin(BasePlugin):
         back = TextView(activity)
         back.setText("←")
         back.setTextSize(20)
+        back.setTypeface(None, Typeface.BOLD)
         back.setTextColor(_c("#FFFFFFFF"))
         back.setPadding(_dp(6), _dp(6), _dp(12), _dp(6))
         back.setClickable(True)
@@ -2545,6 +2556,7 @@ class Plugin(BasePlugin):
         title = TextView(activity)
         title.setText("Добавить RSS-ленту")
         title.setTextSize(20)
+        title.setTypeface(None, Typeface.BOLD)
         title.setTextColor(_c("#FFFFFFFF"))
         top.addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
 
@@ -2942,6 +2954,7 @@ class Plugin(BasePlugin):
             tv_title = TextView(activity)
             tv_title.setText(title)
             tv_title.setTextSize(22)
+            tv_title.setTypeface(None, Typeface.BOLD)
             tv_title.setTextColor(_c("#FFFFFFFF"))
             tv_title.setPadding(0, _dp(10), 0, _dp(10))
             col.addView(tv_title)
@@ -3363,6 +3376,7 @@ class Plugin(BasePlugin):
             img = images[0] if images else ""
             text = str(it.get("text", "") or "")
             important = ("(!)" in title) or ("(!)" in text)
+            veryimportant = ("(!!)" in title) or ("(!!)" in text)
 
             block = LinearLayout(ctx)
             block.setOrientation(LinearLayout.VERTICAL)
@@ -3375,7 +3389,7 @@ class Plugin(BasePlugin):
             except Exception:
                 pass
 
-            if important:
+            if important or veryimportant:
                 block.setBackground(self._bg_important_gradient())
             else:
                 block.setBackground(self._bg_rounded("#141AFFFFFF"))
@@ -3389,8 +3403,10 @@ class Plugin(BasePlugin):
             if title:
                 tv_title = TextView(ctx)
                 tv_title.setText(title)
-                tv_title.setTextSize(16)
-                tv_title.setTextColor(_c("#FFF7E05A" if important else "#FFFFFFFF"))
+                tv_title.setTextSize(32 if veryimportant else (22 if important else 16))
+                tv_title.setTextColor(_c("#FFFF0000" if veryimportant else ("#FFFFFFFF" if important else "#EFEFEFEF")))
+                tv_title.setTypeface(None, Typeface.BOLD)
+                tv_title.invalidate()
                 tv_title.setAlpha(0.98)
                 tv_title.setPadding(0, 0, 0, _dp(6))
                 block.addView(tv_title)
