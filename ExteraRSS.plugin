@@ -1301,6 +1301,18 @@ class Plugin(BasePlugin):
             bg.setStroke(_dp(stroke_dp), _c(stroke_hex, "#00000000"))
         return bg
 
+    def _bg_important_gradient(self):
+        try:
+            bg = GradientDrawable(
+                GradientDrawable.Orientation.LEFT_RIGHT,
+                [_c("#FF1E1E24"), _c("#1EFFFFFF")]
+            )
+            bg.setCornerRadius(float(self._corner_radius_px()))
+            bg.setStroke(_dp(1), _c("#22FFFFFF"))
+            return bg
+        except Exception:
+            return self._bg_rounded("#FF1E1E24", "#22FFFFFF", 1.0)
+
     def _bg_pill(self, fill_hex: str, stroke_hex: str = "#00000000", stroke_dp: float = 0.0):
         bg = GradientDrawable()
         bg.setColor(_c(fill_hex, "#FF1E1E24"))
@@ -3363,7 +3375,10 @@ class Plugin(BasePlugin):
             except Exception:
                 pass
 
-            block.setBackground(self._bg_rounded("#33FFEB3B" if important else "#141AFFFFFF"))
+            if important:
+                block.setBackground(self._bg_important_gradient())
+            else:
+                block.setBackground(self._bg_rounded("#141AFFFFFF"))
             lp_block = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             lp_block.bottomMargin = _dp(10)
             self._list_container.addView(block, lp_block)
