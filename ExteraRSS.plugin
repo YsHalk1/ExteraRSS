@@ -3105,6 +3105,7 @@ class Plugin(BasePlugin):
             img = str(it.get("image", "") or "")
             text = str(it.get("text", "") or "")
             important = ("(!)" in title) or ("(!)" in text)
+            veryimportant = ("(!!)" in title) or ("(!!)" in text)
 
             block = LinearLayout(ctx)
             block.setOrientation(LinearLayout.VERTICAL)
