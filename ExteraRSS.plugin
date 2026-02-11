@@ -27,7 +27,7 @@ from android.view import Gravity, View, ViewGroup, ViewOutlineProvider
 from android.view import HapticFeedbackConstants
 from android.view.animation import DecelerateInterpolator
 
-from android.widget import FrameLayout, LinearLayout, ScrollView, TextView, ImageView, EditText
+from android.widget import FrameLayout, LinearLayout, ScrollView, TextView, ImageView, EditText, SeekBar
 from android.content import Intent
 from android.net import Uri
 
@@ -60,6 +60,44 @@ except ImportError:
         def onKey(self, v, key_code, event):
             return bool(self._fn(v, key_code, event))
 
+try:
+    from android_utils import OnSeekBarChangeListener as _OnSeekBarChangeListener
+except ImportError:
+    try:
+        class _OnSeekBarChangeListener(dynamic_proxy(SeekBar.OnSeekBarChangeListener)):
+            def __init__(self, on_change=None, on_start=None, on_stop=None):
+                super().__init__()
+                self._on_change = on_change
+                self._on_start = on_start
+                self._on_stop = on_stop
+
+            def onProgressChanged(self, seek_bar, progress, from_user):
+                try:
+                    if self._on_change is not None:
+                        self._on_change(seek_bar, int(progress), bool(from_user))
+                except Exception:
+                    pass
+
+            def onStartTrackingTouch(self, seek_bar):
+                try:
+                    if self._on_start is not None:
+                        self._on_start(seek_bar)
+                except Exception:
+                    pass
+
+            def onStopTrackingTouch(self, seek_bar):
+                try:
+                    if self._on_stop is not None:
+                        self._on_stop(seek_bar)
+                except Exception:
+                    pass
+    except Exception:
+        class _OnSeekBarChangeListener:
+            def __init__(self, on_change=None, on_start=None, on_stop=None):
+                self._on_change = on_change
+                self._on_start = on_start
+                self._on_stop = on_stop
+
 
 __id__ = "ExteraRSS"
 __name__ = "ExteraRSS"
@@ -71,6 +109,21 @@ __min_version__ = "11.12.0"
 
 # ---- UI tuning ----
 CORNER_RADIUS_DP = 8
+_UI_SCALE_MIN = 0.80
+_UI_SCALE_MAX = 1.35
+_UI_SCALE = 1.00
+
+
+def _clamp_ui_scale(v: Any) -> float:
+    try:
+        x = float(v)
+    except Exception:
+        x = 1.00
+    if x < _UI_SCALE_MIN:
+        x = _UI_SCALE_MIN
+    if x > _UI_SCALE_MAX:
+        x = _UI_SCALE_MAX
+    return x
 
 
 # ---------------- safe color ----------------
@@ -257,7 +310,7 @@ def _preview_text(text: str, max_len: int = 170, title: str = "") -> str:
     return t[:max_len - 1].rstrip() + "…"
 
 def _dp(x: float) -> int:
-    return AndroidUtilities.dp(float(x))
+    return AndroidUtilities.dp(float(x) * float(_UI_SCALE))
 
 
 def _safe_json_load(s: Any, default):
@@ -1280,6 +1333,7 @@ class Plugin(BasePlugin):
         self._nav_feed_btn: Optional[TextView] = None
         self._nav_subs_btn: Optional[TextView] = None
         self._nav_cats_btn: Optional[TextView] = None
+        self._nav_settings_btn: Optional[TextView] = None
         self._bottom_nav_row: Optional[LinearLayout] = None
         self._bottom_nav_indicator: Optional[View] = None
 
@@ -1289,6 +1343,12 @@ class Plugin(BasePlugin):
         self._gesture_dragging = False
         self._animate_list_once = False
         self._feed_item_touch_listener = None
+
+        self._ui_scale = _clamp_ui_scale(self.get_setting("ui_scale", "1.00"))
+        global _UI_SCALE
+        _UI_SCALE = float(self._ui_scale)
+        self._ui_seek_listener = None
+        self._suppress_open_refresh_once = False
 
     # ---- UI rounding ----
     def _corner_radius_px(self) -> int:
@@ -1348,6 +1408,46 @@ class Plugin(BasePlugin):
             v.requestFocusFromTouch()
         except Exception:
             pass
+
+    def _set_ui_scale(self, value: Any, persist: bool = True):
+        val = _clamp_ui_scale(value)
+        self._ui_scale = val
+        global _UI_SCALE
+        _UI_SCALE = float(val)
+        if persist:
+            try:
+                self.set_setting("ui_scale", f"{val:.2f}")
+            except Exception:
+                pass
+
+    def _ui_scale_percent(self) -> int:
+        try:
+            return int(round(float(self._ui_scale) * 100.0))
+        except Exception:
+            return 100
+
+    def _ui_scale_to_progress(self, value: float) -> int:
+        return int(round((_clamp_ui_scale(value) - _UI_SCALE_MIN) * 100.0))
+
+    def _progress_to_ui_scale(self, progress: int) -> float:
+        return _clamp_ui_scale(_UI_SCALE_MIN + float(progress) / 100.0)
+
+    def _apply_ui_scale_and_reopen(self, value: float):
+        old = float(self._ui_scale)
+        new = _clamp_ui_scale(value)
+        if abs(new - old) < 0.004:
+            return
+        self._set_ui_scale(new, persist=True)
+        if self._overlay is None:
+            return
+        mode_now = self._mode
+        fragment = get_last_fragment()
+        self._suppress_open_refresh_once = True
+        self._close(animated=False)
+        if fragment:
+            self._open(fragment)
+            if mode_now != "feed":
+                self._set_mode(mode_now)
 
     # ---------- lifecycle ----------
     def on_plugin_load(self):
@@ -1582,9 +1682,27 @@ class Plugin(BasePlugin):
                     self._focus_view_safe(overlay)
                 except Exception:
                     pass
+
+            def focus_guard():
+                try:
+                    parent = overlay.getParent()
+                    if parent is None:
+                        return
+                except Exception:
+                    return
+                try:
+                    attach_to_tree(overlay)
+                    self._focus_view_safe(overlay)
+                except Exception:
+                    pass
+                try:
+                    AndroidUtilities.runOnUIThread(Runnable(focus_guard), 420)
+                except Exception:
+                    pass
             try:
                 AndroidUtilities.runOnUIThread(Runnable(late_bind), 80)
                 AndroidUtilities.runOnUIThread(Runnable(late_bind), 220)
+                AndroidUtilities.runOnUIThread(Runnable(focus_guard), 420)
             except Exception:
                 pass
             setattr(self, store_attr, listener)
@@ -1616,12 +1734,15 @@ class Plugin(BasePlugin):
         return f"Категория: {name} ▾"
 
     def _top_filter_label(self) -> str:
+        if self._mode == "settings":
+            return "Настройки"
         return self._category_filter_label() if self._mode == "cats" else self._source_filter_label()
 
     def _update_source_button(self):
         try:
             if self._source_btn is not None:
                 self._source_btn.setText(self._top_filter_label())
+                self._source_btn.setAlpha(0.58 if self._mode == "settings" else 1.0)
         except Exception:
             pass
 
@@ -1670,6 +1791,8 @@ class Plugin(BasePlugin):
         self._render()
 
     def _open_top_filter_picker(self):
+        if self._mode == "settings":
+            return
         if self._mode == "cats":
             self._open_category_picker_screen()
         else:
@@ -2027,7 +2150,7 @@ class Plugin(BasePlugin):
         return b
 
     def _mode_order(self) -> List[str]:
-        return ["feed", "cats", "subs"]
+        return ["feed", "cats", "subs", "settings"]
 
     def _mode_index(self, mode: str) -> int:
         order = self._mode_order()
@@ -2156,22 +2279,26 @@ class Plugin(BasePlugin):
 
     def _update_bottom_nav_state(self):
         try:
-            if self._nav_feed_btn is None or self._nav_subs_btn is None or self._nav_cats_btn is None:
+            if self._nav_feed_btn is None or self._nav_subs_btn is None or self._nav_cats_btn is None or self._nav_settings_btn is None:
                 return
             is_feed = (self._mode == "feed")
             is_subs = (self._mode == "subs")
             is_cats = (self._mode == "cats")
+            is_settings = (self._mode == "settings")
 
             self._nav_feed_btn.setBackground(self._bg_pill("#00000000"))
             self._nav_subs_btn.setBackground(self._bg_pill("#00000000"))
             self._nav_cats_btn.setBackground(self._bg_pill("#00000000"))
+            self._nav_settings_btn.setBackground(self._bg_pill("#00000000"))
 
             self._nav_feed_btn.setAlpha(1.0 if is_feed else 0.78)
             self._nav_subs_btn.setAlpha(1.0 if is_subs else 0.78)
             self._nav_cats_btn.setAlpha(1.0 if is_cats else 0.78)
+            self._nav_settings_btn.setAlpha(1.0 if is_settings else 0.78)
             self._nav_feed_btn.setBackground(self._bg_pill("#2AFFFFFF" if is_feed else "#00000000"))
             self._nav_subs_btn.setBackground(self._bg_pill("#2AFFFFFF" if is_subs else "#00000000"))
             self._nav_cats_btn.setBackground(self._bg_pill("#2AFFFFFF" if is_cats else "#00000000"))
+            self._nav_settings_btn.setBackground(self._bg_pill("#2AFFFFFF" if is_settings else "#00000000"))
         except Exception:
             pass
 
@@ -2338,19 +2465,24 @@ class Plugin(BasePlugin):
         nav_feed = self._bottom_nav_button(activity, "Лента", lambda: self._set_mode("feed"))
         nav_cats = self._bottom_nav_button(activity, "Категории", lambda: self._set_mode("cats"))
         nav_subs = self._bottom_nav_button(activity, "Подписки", lambda: self._set_mode("subs"))
+        nav_settings = self._bottom_nav_button(activity, "Настройки", lambda: self._set_mode("settings"))
         self._nav_feed_btn = nav_feed
         self._nav_cats_btn = nav_cats
         self._nav_subs_btn = nav_subs
+        self._nav_settings_btn = nav_settings
 
         lp_feed = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0)
         lp_cats = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0)
         lp_cats.leftMargin = _dp(6)
         lp_subs = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0)
         lp_subs.leftMargin = _dp(6)
+        lp_settings = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0)
+        lp_settings.leftMargin = _dp(6)
 
         bottom_nav.addView(nav_feed, lp_feed)
         bottom_nav.addView(nav_cats, lp_cats)
         bottom_nav.addView(nav_subs, lp_subs)
+        bottom_nav.addView(nav_settings, lp_settings)
         try:
             bottom_nav.setAlpha(1.0)
             bottom_nav.setTranslationY(float(_dp(14)))
@@ -2487,7 +2619,9 @@ class Plugin(BasePlugin):
             pass
 
 
-        if self.get_setting("auto_refresh", True):
+        if self._suppress_open_refresh_once:
+            self._suppress_open_refresh_once = False
+        elif self.get_setting("auto_refresh", True):
             self._set_refreshing_ui(True)
             self._refresh_async()
 
@@ -2514,11 +2648,13 @@ class Plugin(BasePlugin):
             self._nav_feed_btn = None
             self._nav_cats_btn = None
             self._nav_subs_btn = None
+            self._nav_settings_btn = None
             self._gesture_switched = False
             self._gesture_dragging = False
             self._bottom_nav_row = None
             self._bottom_nav_indicator = None
             self._feed_item_touch_listener = None
+            self._ui_seek_listener = None
 
         if not animated or content is None:
             detach()
@@ -3347,6 +3483,8 @@ class Plugin(BasePlugin):
         try:
             if self._mode == "subs":
                 self._render_subs(ctx)
+            elif self._mode == "settings":
+                self._render_settings(ctx)
             elif self._mode == "cats":
                 self._render_feed(ctx, by_category=True)
             else:
@@ -3542,6 +3680,86 @@ class Plugin(BasePlugin):
                     tv_more.setAlpha(0.62)
                     tv_more.setPadding(0, _dp(4), 0, 0)
                     block.addView(tv_more)
+
+    def _render_settings(self, ctx):
+        h = TextView(ctx)
+        h.setText("Настройки")
+        h.setTextSize(18)
+        h.setTypeface(None, Typeface.BOLD)
+        h.setTextColor(_c("#FFFFFFFF"))
+        h.setPadding(0, _dp(6), 0, _dp(10))
+        self._list_container.addView(h)
+
+        hint = TextView(ctx)
+        hint.setText("Масштаб интерфейса (DPI)")
+        hint.setTextSize(13)
+        hint.setTextColor(_c("#FFFFFFFF"))
+        hint.setAlpha(0.75)
+        hint.setPadding(0, 0, 0, _dp(10))
+        self._list_container.addView(hint)
+
+        card = LinearLayout(ctx)
+        card.setOrientation(LinearLayout.VERTICAL)
+        card.setPadding(_dp(12), _dp(12), _dp(12), _dp(12))
+        card.setBackground(self._bg_rounded("#1E1AFFFFFF", "#24FFFFFF", 1.0))
+        lp_card = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp_card.bottomMargin = _dp(12)
+        self._list_container.addView(card, lp_card)
+
+        val_tv = TextView(ctx)
+        val_tv.setText(f"Текущий масштаб: {self._ui_scale_percent()}%")
+        val_tv.setTextSize(14)
+        val_tv.setTextColor(_c("#FFFFFFFF"))
+        val_tv.setTypeface(None, Typeface.BOLD)
+        val_tv.setPadding(0, 0, 0, _dp(8))
+        card.addView(val_tv)
+
+        sb = SeekBar(ctx)
+        max_progress = max(1, self._ui_scale_to_progress(_UI_SCALE_MAX))
+        cur_progress = self._ui_scale_to_progress(self._ui_scale)
+        try:
+            sb.setMax(max_progress)
+            sb.setProgress(max(0, min(max_progress, cur_progress)))
+        except Exception:
+            pass
+        card.addView(sb, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+
+        scale_range = TextView(ctx)
+        scale_range.setText(f"Диапазон: {int(_UI_SCALE_MIN * 100)}% - {int(_UI_SCALE_MAX * 100)}%")
+        scale_range.setTextSize(12)
+        scale_range.setTextColor(_c("#FFFFFFFF"))
+        scale_range.setAlpha(0.62)
+        scale_range.setPadding(0, _dp(6), 0, 0)
+        card.addView(scale_range)
+
+        def on_progress(_sb, progress, from_user):
+            try:
+                if not from_user:
+                    return
+                val = self._progress_to_ui_scale(int(progress))
+                val_tv.setText(f"Текущий масштаб: {int(round(val * 100))}%")
+            except Exception:
+                pass
+
+        def on_stop(_sb):
+            try:
+                val = self._progress_to_ui_scale(int(_sb.getProgress() or 0))
+                self._apply_ui_scale_and_reopen(val)
+            except Exception:
+                pass
+
+        try:
+            self._ui_seek_listener = _OnSeekBarChangeListener(on_progress, None, on_stop)
+            sb.setOnSeekBarChangeListener(self._ui_seek_listener)
+        except Exception as e:
+            log(f"[RSS] settings seekbar bind error: {e}")
+
+        reset_btn = self._primary_button(ctx, "Сбросить: 100%", lambda: self._apply_ui_scale_and_reopen(1.0))
+        self._list_container.addView(reset_btn, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
 
     def _render_subs(self, ctx):
         entries = self._get_sub_entries()
