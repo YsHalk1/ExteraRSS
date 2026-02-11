@@ -199,11 +199,47 @@ def _reply_text_only(reply_raw: str) -> str:
     s = (reply_raw or "").strip()
     if not s:
         return ""
-    # чаще всего "Name — Text"
-    if " — " in s:
-        parts = s.split(" — ", 1)
-        tail = (parts[1] or "").strip()
-        return tail if tail else s
+
+    # TG-реплай чаще всего выглядит как "Author — Text".
+    # Поддерживаем em/en dash для обычных имён и допускаем простой дефис
+    # только для @handle, чтобы не резать обычные фразы с " - ".
+    m = re.match(r"^(.+?)\s+([—–-])\s+(.+)$", s)
+    if not m:
+        return s
+
+    head = (m.group(1) or "").strip()
+    sep = m.group(2)
+    tail = (m.group(3) or "").strip()
+    if not head or not tail:
+        return s
+
+    # Ограничиваем длину, чтобы не принимать длинные текстовые префиксы за автора.
+    if len(head) > 48:
+        return s
+
+    punct = ".,!?:;()[]{}\"'“”«»"
+    parts = [w.strip(punct) for w in head.split() if w.strip(punct)]
+    if not parts or len(parts) > 4:
+        return s
+
+    def _is_handle(tok: str) -> bool:
+        return bool(re.match(r"^@[A-Za-z0-9_]{3,32}$", tok))
+
+    def _is_name_word(tok: str) -> bool:
+        return bool(re.match(r"^[A-Za-zА-Яа-яЁё0-9_'’]+$", tok)) and len(tok) >= 2
+
+    # Для "-" разрешаем только @handle-prefix.
+    if sep == "-":
+        if _is_handle(parts[0]) and len(parts) == 1:
+            return tail
+        return s
+
+    # Для "—/–" допускаем @handle или 1-4 name-like слова.
+    if _is_handle(parts[0]):
+        return tail
+    if all(_is_name_word(w) for w in parts):
+        return tail
+
     return s
 
 def _ensure_at(src: str) -> str:
@@ -536,7 +572,7 @@ def _format_ru_datetime(ts: int) -> str:
 
 # ---------------- HTTP ----------------
 def _http_get(url: str, timeout_sec: int = 12) -> bytes:
-    req = urllib.request.Request(url, headers={"User-Agent": "Exteragram-RSS-Plugin/1.4.4"})
+    req = urllib.request.Request(url, headers={"User-Agent": f"Exteragram-RSS-Plugin/{__version__}"})
     with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
         return resp.read()
 
