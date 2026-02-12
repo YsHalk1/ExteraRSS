@@ -285,8 +285,7 @@ def _reply_text_only(reply_raw: str) -> str:
         return bool(re.match(r"^@[A-Za-z0-9_]{3,32}$", tok))
 
     def _is_name_word(tok: str) -> bool:
-    scaled = float(x) * float(_UI_SCALE)
-    return AndroidUtilities.dp(scaled)
+    return AndroidUtilities.dp(float(x) * float(_UI_SCALE))
 
     # Для "-" разрешаем только @handle-prefix.
     if sep == "-":
