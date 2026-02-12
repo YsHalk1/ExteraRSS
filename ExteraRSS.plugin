@@ -1326,6 +1326,8 @@ class Plugin(BasePlugin):
         self._src_back_listener = None
         self._post_back_listener = None
         self._img_back_listener = None
+        self._mini_overlay: Optional[FrameLayout] = None
+        self._mini_link: str = ""
 
         self._source_filter: str = ""
         self._category_filter: str = ""
@@ -1470,6 +1472,7 @@ class Plugin(BasePlugin):
         run_on_ui_thread(lambda: self._close_source_picker_screen(animated=False))
         run_on_ui_thread(lambda: self._close_post_screen(animated=False))
         run_on_ui_thread(lambda: self._close_image_screen(animated=False))
+        run_on_ui_thread(lambda: self._close_mini_overlay())
 
     # ---------- settings ----------
     def _clear_cache(self):
@@ -3842,6 +3845,88 @@ class Plugin(BasePlugin):
         if self._animate_list_once:
             self._animate_entry(plus_btn, 2)
 
+    def _set_main_overlays_visibility(self, visible: bool):
+        vis = View.VISIBLE if visible else View.GONE
+        for ov in (self._overlay, self._add_overlay, self._cat_overlay, self._src_overlay, self._post_overlay, self._img_overlay):
+            if ov is None:
+                continue
+            try:
+                ov.setVisibility(vis)
+            except Exception:
+                pass
+
+    def _close_mini_overlay(self):
+        mini = self._mini_overlay
+        if mini is None:
+            return
+        try:
+            parent = mini.getParent()
+            if parent and isinstance(parent, ViewGroup):
+                parent.removeView(mini)
+        except Exception:
+            pass
+        self._mini_overlay = None
+        self._mini_link = ""
+
+    def _restore_from_mini(self):
+        self._set_main_overlays_visibility(True)
+        self._close_mini_overlay()
+
+    def _minimize_to_mini_overlay(self, fragment, link: str):
+        if self._mini_overlay is not None:
+            self._mini_link = str(link or "")
+            return
+        if not fragment:
+            fragment = get_last_fragment()
+        if not fragment:
+            return
+        activity = fragment.getParentActivity()
+        if not activity:
+            return
+        decor = activity.getWindow().getDecorView()
+        if not isinstance(decor, ViewGroup):
+            return
+
+        self._set_main_overlays_visibility(False)
+
+        mini = FrameLayout(activity)
+        mini.setClickable(True)
+        mini.setFocusable(True)
+        mini.setBackground(self._bg_rounded("#E6191C26", "#33FFFFFF", 1.0))
+        mini.setPadding(_dp(10), _dp(8), _dp(10), _dp(8))
+
+        row = LinearLayout(activity)
+        row.setOrientation(LinearLayout.HORIZONTAL)
+        row.setGravity(Gravity.CENTER_VERTICAL)
+        mini.addView(row)
+
+        title = TextView(activity)
+        title.setText("ExteraRSS свернуто")
+        title.setTextSize(11)
+        title.setTextColor(_c("#FFFFFFFF"))
+        title.setAlpha(0.90)
+        row.addView(title)
+
+        close_btn = TextView(activity)
+        close_btn.setText("  ✕")
+        close_btn.setTextSize(11)
+        close_btn.setTextColor(_c("#FFFFFFFF"))
+        close_btn.setAlpha(0.88)
+        close_btn.setClickable(True)
+        close_btn.setOnClickListener(OnClickListener(lambda _v: self._close_mini_overlay()))
+        row.addView(close_btn)
+
+        mini.setOnClickListener(OnClickListener(lambda _v: self._restore_from_mini()))
+
+        lp = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp.gravity = int(Gravity.END | Gravity.BOTTOM)
+        lp.rightMargin = _dp(14)
+        lp.bottomMargin = _dp(18)
+
+        decor.addView(mini, lp)
+        self._mini_overlay = mini
+        self._mini_link = str(link or "")
+
     def _remove_sub(self, sub_key: str):
         if not sub_key:
             return
@@ -3864,6 +3949,7 @@ class Plugin(BasePlugin):
         if not activity:
             return
         try:
+            self._minimize_to_mini_overlay(fragment, link)
             intent = Intent(Intent.ACTION_VIEW, Uri.parse(link))
             activity.startActivity(intent)
         except Exception as e:
