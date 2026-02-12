@@ -117,8 +117,8 @@ CORNER_RADIUS_DP = 8
 _UI_SCALE_MIN = 0.80
 _UI_SCALE_MAX = 1.35
 _UI_SCALE = 1.00
-_UI_PAD_MIN = 10
-_UI_PAD_MAX = 28
+_UI_PAD_MIN = 0
+_UI_PAD_MAX = 30
 
 
 def _clamp_ui_scale(v: Any) -> float:
