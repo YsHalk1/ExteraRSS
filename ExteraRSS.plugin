@@ -35,7 +35,7 @@ from datetime import datetime, timezone
 
 from java import dynamic_proxy
 from java.lang import Runnable
-from android.view import MotionEvent, KeyEvent
+from android.view import MotionEvent, KeyEvent, ViewConfiguration, KeyCharacterMap
 
 try:
     from java.util import Locale as JavaLocale
@@ -392,6 +392,30 @@ def _statusbar_pad() -> int:
 
 
 # ---------- normalize subscription ----------
+def _navbar_pad(ctx=None) -> int:
+    """Best-effort bottom inset for 3-button / gesture navigation areas."""
+    try:
+        if ctx is not None:
+            # Если есть физические кнопки, чаще всего нижняя inset-панель не нужна.
+            try:
+                has_menu = bool(ViewConfiguration.get(ctx).hasPermanentMenuKey())
+                has_back = bool(KeyCharacterMap.deviceHasKey(int(KeyEvent.KEYCODE_BACK)))
+                if has_menu and has_back:
+                    return 0
+            except Exception:
+                pass
+
+            res = ctx.getResources()
+            nav_id = int(res.getIdentifier("navigation_bar_height", "dimen", "android") or 0)
+            if nav_id > 0:
+                px = int(res.getDimensionPixelSize(nav_id) or 0)
+                if px > 0:
+                    return px
+    except Exception:
+        pass
+    return 0
+
+
 def _norm_sub(line: str) -> Optional[str]:
     """
     Valid:
@@ -2502,7 +2526,19 @@ class Plugin(BasePlugin):
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
         ))
-        content.setPadding(_dp(16), _statusbar_pad() + _dp(10), _dp(16), _dp(14))
+        bottom_safe_pad = _dp(14)
+        try:
+            inset_bottom = 0
+            try:
+                wi = decor.getRootWindowInsets()
+                if wi is not None:
+                    inset_bottom = int(wi.getStableInsetBottom() or 0)
+            except Exception:
+                inset_bottom = 0
+            bottom_safe_pad = max(bottom_safe_pad, int(_navbar_pad(activity) or 0), int(inset_bottom or 0))
+        except Exception:
+            pass
+        content.setPadding(_dp(16), _statusbar_pad() + _dp(10), _dp(16), bottom_safe_pad)
         overlay.addView(content)
 
         top = LinearLayout(activity)
@@ -2593,6 +2629,7 @@ class Plugin(BasePlugin):
         bottom_nav.setBackground(self._bg_pill("#1C1AFFFFFF", "#24FFFFFF", 0.0))
         lp_nav = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         lp_nav.topMargin = _dp(10)
+        lp_nav.bottomMargin = max(_dp(2), int(_navbar_pad(activity) or 0) // 6)
         content.addView(bottom_nav, lp_nav)
 
         nav_feed = self._bottom_nav_button(activity, _tr("Лента", "Feed"), lambda: self._set_mode("feed"))
