@@ -3885,6 +3885,21 @@ class Plugin(BasePlugin):
         except Exception:
             run_on_ui_thread(detach)
 
+    def _dismiss_mini_and_close_plugin(self):
+        # Закрыть мини-виджет и полностью закрыть интерфейс плагина,
+        # чтобы следующий вызов _open не упирался в скрытый overlay.
+        self._set_main_overlays_visibility(True)
+        self._close_mini_overlay(animated=True)
+        try:
+            self._close_source_picker_screen(animated=False)
+            self._close_add_feed_screen(animated=False)
+            self._close_category_screen(animated=False)
+            self._close_post_screen(animated=False)
+            self._close_image_screen(animated=False)
+            self._close(animated=False)
+        except Exception:
+            pass
+
     def _restore_from_mini(self):
         self._set_main_overlays_visibility(True)
         try:
@@ -3930,6 +3945,16 @@ class Plugin(BasePlugin):
         row.setGravity(Gravity.CENTER_VERTICAL)
         mini.addView(row)
 
+        close_btn = TextView(activity)
+        close_btn.setText("✕")
+        close_btn.setTextSize(13)
+        close_btn.setTextColor(_c("#FFFFFFFF"))
+        close_btn.setAlpha(0.90)
+        close_btn.setClickable(True)
+        close_btn.setPadding(0, 0, _dp(8), 0)
+        close_btn.setOnClickListener(OnClickListener(lambda _v: self._dismiss_mini_and_close_plugin()))
+        row.addView(close_btn)
+
         title_col = LinearLayout(activity)
         title_col.setOrientation(LinearLayout.VERTICAL)
         row.addView(title_col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
@@ -3948,15 +3973,6 @@ class Plugin(BasePlugin):
         sub.setAlpha(0.72)
         sub.setPadding(0, _dp(2), 0, 0)
         title_col.addView(sub)
-
-        close_btn = TextView(activity)
-        close_btn.setText(" ✕")
-        close_btn.setTextSize(13)
-        close_btn.setTextColor(_c("#FFFFFFFF"))
-        close_btn.setAlpha(0.90)
-        close_btn.setClickable(True)
-        close_btn.setOnClickListener(OnClickListener(lambda _v: self._close_mini_overlay(animated=True)))
-        row.addView(close_btn)
 
         mini.setOnClickListener(OnClickListener(lambda _v: self._restore_from_mini()))
 
