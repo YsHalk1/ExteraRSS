@@ -2591,7 +2591,7 @@ class Plugin(BasePlugin):
             bottom_safe_pad = max(bottom_safe_pad, int(_navbar_pad(activity) or 0), int(inset_bottom or 0))
         except Exception:
             pass
-        content.setPadding(_dp(self._ui_pad), _statusbar_pad() + _dp(10), _dp(self._ui_pad), bottom_safe_pad)
+        content.setPadding(_dp(16), _statusbar_pad() + _dp(10), _dp(16), bottom_safe_pad)
         overlay.addView(content)
 
         top = LinearLayout(activity)
@@ -2682,7 +2682,7 @@ class Plugin(BasePlugin):
         bottom_nav.setBackground(self._bg_pill("#1C1AFFFFFF", "#24FFFFFF", 0.0))
         lp_nav = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         lp_nav.topMargin = _dp(10)
-        lp_nav.bottomMargin = max(_dp(2), int(_navbar_pad(activity) or 0) // 6)
+        lp_nav.bottomMargin = max(_dp(self._ui_pad), int(_navbar_pad(activity) or 0))
         content.addView(bottom_nav, lp_nav)
 
         nav_feed = self._bottom_nav_button(activity, _tr("Лента", "Feed"), lambda: self._set_mode("feed"))
@@ -2958,7 +2958,7 @@ class Plugin(BasePlugin):
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
         ))
-        content.setPadding(_dp(self._ui_pad), _statusbar_pad() + _dp(10), _dp(self._ui_pad), _dp(14))
+        content.setPadding(_dp(16), _statusbar_pad() + _dp(10), _dp(16), _dp(14))
         overlay.addView(content)
 
         top = LinearLayout(activity)
@@ -3165,7 +3165,7 @@ class Plugin(BasePlugin):
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
         ))
-        content.setPadding(_dp(self._ui_pad), _statusbar_pad() + _dp(10), _dp(self._ui_pad), _dp(14))
+        content.setPadding(_dp(16), _statusbar_pad() + _dp(10), _dp(16), _dp(14))
         overlay.addView(content)
 
         top = LinearLayout(activity)
@@ -3335,7 +3335,7 @@ class Plugin(BasePlugin):
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
         ))
-        content.setPadding(_dp(self._ui_pad), _statusbar_pad() + _dp(10), _dp(self._ui_pad), _dp(14))
+        content.setPadding(_dp(16), _statusbar_pad() + _dp(10), _dp(16), _dp(14))
         overlay.addView(content)
 
         top = LinearLayout(activity)
@@ -3535,7 +3535,7 @@ class Plugin(BasePlugin):
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
         ))
-        content.setPadding(_dp(self._ui_pad), _statusbar_pad() + _dp(10), _dp(self._ui_pad), _dp(14))
+        content.setPadding(_dp(16), _statusbar_pad() + _dp(10), _dp(16), _dp(14))
         overlay.addView(content)
 
         top = LinearLayout(activity)
@@ -3981,7 +3981,7 @@ class Plugin(BasePlugin):
 
         # --- UI padding ---
         hint_pad = TextView(ctx)
-        hint_pad.setText(_tr("Отступ интерфейса (dp)", "Interface padding (dp)"))
+        hint_pad.setText(_tr("Отступ нижнего таба от низа (dp)", "Bottom tab offset (dp)"))
         hint_pad.setTextSize(13)
         hint_pad.setTextColor(_c("#FFFFFFFF"))
         hint_pad.setAlpha(0.75)
@@ -3997,7 +3997,7 @@ class Plugin(BasePlugin):
         self._list_container.addView(card_pad, lp_card_pad)
 
         val_pad_tv = TextView(ctx)
-        val_pad_tv.setText((_tr("Текущий отступ", "Current padding") + f": {int(self._ui_pad)}dp"))
+        val_pad_tv.setText((_tr("Текущий отступ таба", "Current tab offset") + f": {int(self._ui_pad)}dp"))
         val_pad_tv.setTextSize(14)
         val_pad_tv.setTextColor(_c("#FFFFFFFF"))
         val_pad_tv.setTypeface(None, Typeface.BOLD)
@@ -4029,7 +4029,7 @@ class Plugin(BasePlugin):
                 if not from_user:
                     return
                 val = self._progress_to_ui_pad(int(progress))
-                val_pad_tv.setText((_tr("Текущий отступ", "Current padding") + f": {int(val)}dp"))
+                val_pad_tv.setText((_tr("Текущий отступ таба", "Current tab offset") + f": {int(val)}dp"))
             except Exception:
                 pass
 
@@ -4051,7 +4051,7 @@ class Plugin(BasePlugin):
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ))
 
-        reset_pad_btn = self._primary_button(ctx, _tr("Сбросить отступ: 16dp", "Reset padding: 16dp"), lambda: self._apply_ui_pad_and_reopen(16))
+        reset_pad_btn = self._primary_button(ctx, _tr("Сбросить отступ таба: 16dp", "Reset tab offset: 16dp"), lambda: self._apply_ui_pad_and_reopen(16))
         lp_reset_pad = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         lp_reset_pad.topMargin = _dp(8)
         self._list_container.addView(reset_pad_btn, lp_reset_pad)
