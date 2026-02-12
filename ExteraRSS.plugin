@@ -984,6 +984,10 @@ _RE_OG_TITLE = re.compile(
     r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']',
     re.S | re.I
 )
+_RE_OG_DESC = re.compile(
+    r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']*)["\']',
+    re.S | re.I
+)
 
 def _extract_tg_channel_title(html: str, username: str) -> str:
     if not html:
@@ -1009,6 +1013,18 @@ def _extract_tg_channel_title(html: str, username: str) -> str:
         pass
 
     return f"@{username}"
+
+
+def _extract_tg_og_description(html: str) -> str:
+    if not html:
+        return ""
+    try:
+        m = _RE_OG_DESC.search(html)
+        if m:
+            return _strip_tags_and_format(m.group(1) or "").strip()
+    except Exception:
+        pass
+    return ""
 
 
 def _extract_tg_reply(block_html: str) -> str:
@@ -1305,7 +1321,32 @@ def _fetch_tg_user_feed(username: str) -> Tuple[str, List[Dict[str, Any]]]:
         html = str(data)
 
     ch_title = _extract_tg_channel_title(html, username)  # ✅ настоящее имя
-    return _parse_tg_preview_page(html, username, ch_title)
+    src_title, items = _parse_tg_preview_page(html, username, ch_title)
+
+    # Для некоторых каналов (в т.ч. NSFW/ограниченных) Telegram не отдаёт посты в web-preview.
+    # Добавляем fallback-карточку, чтобы источник всё равно отображался в ленте.
+    if not items:
+        desc = _extract_tg_og_description(html)
+        if not desc:
+            desc = f"Посты канала @{username} недоступны в web-preview. Откройте канал в Telegram."
+        items = [{
+            "source": src_title,
+            "source_handle": f"@{username}",
+            "source_title": src_title,
+            "title": src_title,
+            "link": f"https://t.me/{username}",
+            "tg_post_id": f"{username}/channel_preview",
+            "published_raw": "",
+            "ts": 0,
+            "text": desc,
+            "image": "",
+            "images": [],
+            "reply": "",
+            "doc": "",
+            "voice": "",
+        }]
+
+    return (src_title, items)
 
 # ---------------- Plugin ----------------
 class Plugin(BasePlugin):
