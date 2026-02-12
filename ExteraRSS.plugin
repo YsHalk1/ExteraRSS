@@ -1412,6 +1412,7 @@ class Plugin(BasePlugin):
         self._src_back_listener = None
         self._post_back_listener = None
         self._img_back_listener = None
+        self._mini_back_listener = None
         self._mini_overlay: Optional[FrameLayout] = None
         self._mini_link: str = ""
 
@@ -1807,6 +1808,36 @@ class Plugin(BasePlugin):
         except Exception as e:
             log(f"[RSS] back handler bind error: {e}")
 
+    def _handle_back_action(self) -> bool:
+        """Back should step through plugin states and never close Telegram directly."""
+        try:
+            if self._mini_overlay is not None:
+                self._restore_from_mini()
+                return True
+            if self._img_overlay is not None:
+                self._close_image_screen(animated=True)
+                return True
+            if self._post_overlay is not None:
+                self._close_post_screen(animated=True)
+                return True
+            if self._src_overlay is not None:
+                self._close_source_picker_screen(animated=True)
+                return True
+            if self._cat_overlay is not None:
+                self._close_category_screen(animated=True)
+                return True
+            if self._add_overlay is not None:
+                self._close_add_feed_screen(animated=True)
+                return True
+            if self._overlay is not None:
+                # В ленте/категориях/подписках/настройках закрываем только интерфейс плагина.
+                self._close(animated=True)
+                return True
+        except Exception as e:
+            log(f"[RSS] back action error: {e}")
+            return False
+        return False
+
     def _set_refreshing_ui(self, val: bool):
         self._refreshing = bool(val)
         try:
@@ -1983,7 +2014,7 @@ class Plugin(BasePlugin):
         self._src_overlay = overlay
         self._src_content = card
         decor.addView(overlay)
-        self._bind_back_handler(overlay, lambda: self._close_source_picker_screen(animated=True), "_src_back_listener")
+        self._bind_back_handler(overlay, lambda: self._handle_back_action(), "_src_back_listener")
 
         try:
             overlay.setAlpha(0.0)
@@ -2460,7 +2491,7 @@ class Plugin(BasePlugin):
         except Exception as e:
             log(f"[RSS] _open: decor.addView failed: {e}")
             return
-        self._bind_back_handler(overlay, lambda: self._close(animated=True), "_main_back_listener")
+        self._bind_back_handler(overlay, lambda: self._handle_back_action(), "_main_back_listener")
 
         content = LinearLayout(activity)
         content.setOrientation(LinearLayout.VERTICAL)
@@ -2926,7 +2957,7 @@ class Plugin(BasePlugin):
         self._add_overlay = overlay
         self._add_content = content
         decor.addView(overlay)
-        self._bind_back_handler(overlay, lambda: self._close_add_feed_screen(animated=True), "_add_back_listener")
+        self._bind_back_handler(overlay, lambda: self._handle_back_action(), "_add_back_listener")
 
         try:
             overlay.setAlpha(0.0)
@@ -3100,7 +3131,7 @@ class Plugin(BasePlugin):
         self._cat_overlay = overlay
         self._cat_content = content
         decor.addView(overlay)
-        self._bind_back_handler(overlay, lambda: self._close_category_screen(animated=True), "_cat_back_listener")
+        self._bind_back_handler(overlay, lambda: self._handle_back_action(), "_cat_back_listener")
 
         try:
             overlay.setAlpha(0.0)
@@ -3332,7 +3363,7 @@ class Plugin(BasePlugin):
         self._post_overlay = overlay
         self._post_content = content
         decor.addView(overlay)
-        self._bind_back_handler(overlay, lambda: self._close_post_screen(animated=True), "_post_back_listener")
+        self._bind_back_handler(overlay, lambda: self._handle_back_action(), "_post_back_listener")
         content.addView(sv)
 
         try:
@@ -3467,7 +3498,7 @@ class Plugin(BasePlugin):
         self._img_overlay = overlay
         self._img_content = content
         decor.addView(overlay)
-        self._bind_back_handler(overlay, lambda: self._close_image_screen(animated=True), "_img_back_listener")
+        self._bind_back_handler(overlay, lambda: self._handle_back_action(), "_img_back_listener")
 
         try:
             overlay.setAlpha(0.0)
@@ -3955,6 +3986,7 @@ class Plugin(BasePlugin):
                 pass
             self._mini_overlay = None
             self._mini_link = ""
+            self._mini_back_listener = None
 
         if not animated:
             detach()
@@ -4068,6 +4100,7 @@ class Plugin(BasePlugin):
         lp.bottomMargin = _dp(22)
 
         decor.addView(mini, lp)
+        self._bind_back_handler(mini, lambda: self._handle_back_action(), "_mini_back_listener")
 
         try:
             mini.setAlpha(0.0)
