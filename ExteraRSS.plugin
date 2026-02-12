@@ -3855,22 +3855,47 @@ class Plugin(BasePlugin):
             except Exception:
                 pass
 
-    def _close_mini_overlay(self):
+    def _close_mini_overlay(self, animated: bool = True):
         mini = self._mini_overlay
         if mini is None:
             return
+
+        def detach():
+            try:
+                parent = mini.getParent()
+                if parent and isinstance(parent, ViewGroup):
+                    parent.removeView(mini)
+            except Exception:
+                pass
+            self._mini_overlay = None
+            self._mini_link = ""
+
+        if not animated:
+            detach()
+            return
+
         try:
-            parent = mini.getParent()
-            if parent and isinstance(parent, ViewGroup):
-                parent.removeView(mini)
+            mini.animate().alpha(0.0).scaleX(0.92).scaleY(0.92).setDuration(140).start()
         except Exception:
-            pass
-        self._mini_overlay = None
-        self._mini_link = ""
+            detach()
+            return
+
+        try:
+            AndroidUtilities.runOnUIThread(Runnable(detach), 150)
+        except Exception:
+            run_on_ui_thread(detach)
 
     def _restore_from_mini(self):
         self._set_main_overlays_visibility(True)
-        self._close_mini_overlay()
+        try:
+            for ov in (self._overlay, self._add_overlay, self._cat_overlay, self._src_overlay, self._post_overlay, self._img_overlay):
+                if ov is None:
+                    continue
+                ov.setAlpha(0.0)
+                ov.animate().alpha(1.0).setDuration(170).start()
+        except Exception:
+            pass
+        self._close_mini_overlay(animated=True)
 
     def _minimize_to_mini_overlay(self, fragment, link: str):
         if self._mini_overlay is not None:
@@ -3892,38 +3917,64 @@ class Plugin(BasePlugin):
         mini = FrameLayout(activity)
         mini.setClickable(True)
         mini.setFocusable(True)
-        mini.setBackground(self._bg_rounded("#E6191C26", "#33FFFFFF", 1.0))
-        mini.setPadding(_dp(10), _dp(8), _dp(10), _dp(8))
+        # Без обводки: только заливка, визуально как всплывающее уведомление.
+        mini.setBackground(self._bg_rounded("#E6191C26"))
+        mini.setPadding(_dp(14), _dp(12), _dp(14), _dp(12))
+        try:
+            mini.setMinimumWidth(_dp(210))
+        except Exception:
+            pass
 
         row = LinearLayout(activity)
         row.setOrientation(LinearLayout.HORIZONTAL)
         row.setGravity(Gravity.CENTER_VERTICAL)
         mini.addView(row)
 
+        title_col = LinearLayout(activity)
+        title_col.setOrientation(LinearLayout.VERTICAL)
+        row.addView(title_col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
+
         title = TextView(activity)
         title.setText("ExteraRSS свернуто")
-        title.setTextSize(11)
+        title.setTextSize(13)
         title.setTextColor(_c("#FFFFFFFF"))
-        title.setAlpha(0.90)
-        row.addView(title)
+        title.setAlpha(0.96)
+        title_col.addView(title)
+
+        sub = TextView(activity)
+        sub.setText("Нажмите, чтобы развернуть")
+        sub.setTextSize(11)
+        sub.setTextColor(_c("#FFFFFFFF"))
+        sub.setAlpha(0.72)
+        sub.setPadding(0, _dp(2), 0, 0)
+        title_col.addView(sub)
 
         close_btn = TextView(activity)
-        close_btn.setText("  ✕")
-        close_btn.setTextSize(11)
+        close_btn.setText(" ✕")
+        close_btn.setTextSize(13)
         close_btn.setTextColor(_c("#FFFFFFFF"))
-        close_btn.setAlpha(0.88)
+        close_btn.setAlpha(0.90)
         close_btn.setClickable(True)
-        close_btn.setOnClickListener(OnClickListener(lambda _v: self._close_mini_overlay()))
+        close_btn.setOnClickListener(OnClickListener(lambda _v: self._close_mini_overlay(animated=True)))
         row.addView(close_btn)
 
         mini.setOnClickListener(OnClickListener(lambda _v: self._restore_from_mini()))
 
         lp = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         lp.gravity = int(Gravity.END | Gravity.BOTTOM)
-        lp.rightMargin = _dp(14)
-        lp.bottomMargin = _dp(18)
+        lp.rightMargin = _dp(16)
+        lp.bottomMargin = _dp(22)
 
         decor.addView(mini, lp)
+
+        try:
+            mini.setAlpha(0.0)
+            mini.setScaleX(0.92)
+            mini.setScaleY(0.92)
+            mini.animate().alpha(1.0).scaleX(1.0).scaleY(1.0).setDuration(180).start()
+        except Exception:
+            pass
+
         self._mini_overlay = mini
         self._mini_link = str(link or "")
 
