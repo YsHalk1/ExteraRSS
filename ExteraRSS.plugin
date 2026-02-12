@@ -1415,6 +1415,7 @@ class Plugin(BasePlugin):
         self._mini_back_listener = None
         self._mini_overlay: Optional[FrameLayout] = None
         self._mini_link: str = ""
+        self._back_tracking_paused = False
 
         self._source_filter: str = ""
         self._category_filter: str = ""
@@ -1726,6 +1727,8 @@ class Plugin(BasePlugin):
 
             def on_key(_v, key_code, event):
                 try:
+                    if bool(getattr(self, "_back_tracking_paused", False)):
+                        return False
                     if int(key_code) != int(KeyEvent.KEYCODE_BACK):
                         return False
                     act = int(event.getAction())
@@ -3987,6 +3990,7 @@ class Plugin(BasePlugin):
             self._mini_overlay = None
             self._mini_link = ""
             self._mini_back_listener = None
+            self._back_tracking_paused = False
 
         if not animated:
             detach()
@@ -4006,6 +4010,7 @@ class Plugin(BasePlugin):
     def _dismiss_mini_and_close_plugin(self):
         # Закрыть мини-виджет и полностью закрыть интерфейс плагина,
         # чтобы следующий вызов _open не упирался в скрытый overlay.
+        self._back_tracking_paused = False
         self._set_main_overlays_visibility(True)
         self._close_mini_overlay(animated=True)
         try:
@@ -4019,6 +4024,7 @@ class Plugin(BasePlugin):
             pass
 
     def _restore_from_mini(self):
+        self._back_tracking_paused = False
         self._set_main_overlays_visibility(True)
         try:
             for ov in (self._overlay, self._add_overlay, self._cat_overlay, self._src_overlay, self._post_overlay, self._img_overlay):
@@ -4046,6 +4052,7 @@ class Plugin(BasePlugin):
             return
 
         self._set_main_overlays_visibility(False)
+        self._back_tracking_paused = True
 
         mini = FrameLayout(activity)
         mini.setClickable(True)
