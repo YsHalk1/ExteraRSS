@@ -117,6 +117,8 @@ CORNER_RADIUS_DP = 8
 _UI_SCALE_MIN = 0.80
 _UI_SCALE_MAX = 1.35
 _UI_SCALE = 1.00
+_UI_PAD_MIN = 10
+_UI_PAD_MAX = 28
 
 
 def _clamp_ui_scale(v: Any) -> float:
@@ -128,6 +130,18 @@ def _clamp_ui_scale(v: Any) -> float:
         x = _UI_SCALE_MIN
     if x > _UI_SCALE_MAX:
         x = _UI_SCALE_MAX
+    return x
+
+
+def _clamp_ui_pad(v: Any) -> int:
+    try:
+        x = int(round(float(v)))
+    except Exception:
+        x = 16
+    if x < _UI_PAD_MIN:
+        x = _UI_PAD_MIN
+    if x > _UI_PAD_MAX:
+        x = _UI_PAD_MAX
     return x
 
 def _is_ru_locale() -> bool:
@@ -1459,9 +1473,11 @@ class Plugin(BasePlugin):
         self._feed_item_touch_listener = None
 
         self._ui_scale = _clamp_ui_scale(self.get_setting("ui_scale", "1.00"))
+        self._ui_pad = _clamp_ui_pad(self.get_setting("ui_pad", "16"))
         global _UI_SCALE
         _UI_SCALE = float(self._ui_scale)
         self._ui_seek_listener = None
+        self._ui_pad_seek_listener = None
         self._suppress_open_refresh_once = False
 
     # ---- UI rounding ----
@@ -1534,13 +1550,27 @@ class Plugin(BasePlugin):
             except Exception:
                 pass
 
+    def _set_ui_pad(self, value: Any, persist: bool = True):
+        val = _clamp_ui_pad(value)
+        self._ui_pad = int(val)
+        if persist:
+            try:
+                self.set_setting("ui_pad", str(int(val)))
+            except Exception:
+                pass
+
     def _reload_ui_scale_from_settings(self):
-        """Reload persisted UI scale after plugin runtime/storage is fully initialized."""
+        """Reload persisted UI scale/padding after plugin runtime/storage is fully initialized."""
         try:
             raw = self.get_setting("ui_scale", f"{self._ui_scale:.2f}")
         except Exception:
             raw = self._ui_scale
         self._set_ui_scale(raw, persist=False)
+        try:
+            raw_pad = self.get_setting("ui_pad", str(int(self._ui_pad)))
+        except Exception:
+            raw_pad = self._ui_pad
+        self._set_ui_pad(raw_pad, persist=False)
 
     def _ui_scale_percent(self) -> int:
         try:
@@ -1560,6 +1590,29 @@ class Plugin(BasePlugin):
         if abs(new - old) < 0.004:
             return
         self._set_ui_scale(new, persist=True)
+        if self._overlay is None:
+            return
+        mode_now = self._mode
+        fragment = get_last_fragment()
+        self._suppress_open_refresh_once = True
+        self._close(animated=False)
+        if fragment:
+            self._open(fragment)
+            if mode_now != "feed":
+                self._set_mode(mode_now)
+
+    def _ui_pad_to_progress(self, value: int) -> int:
+        return int(_clamp_ui_pad(value) - _UI_PAD_MIN)
+
+    def _progress_to_ui_pad(self, progress: int) -> int:
+        return _clamp_ui_pad(_UI_PAD_MIN + int(progress))
+
+    def _apply_ui_pad_and_reopen(self, value: int):
+        old = int(self._ui_pad)
+        new = _clamp_ui_pad(value)
+        if int(new) == int(old):
+            return
+        self._set_ui_pad(new, persist=True)
         if self._overlay is None:
             return
         mode_now = self._mode
@@ -2538,7 +2591,7 @@ class Plugin(BasePlugin):
             bottom_safe_pad = max(bottom_safe_pad, int(_navbar_pad(activity) or 0), int(inset_bottom or 0))
         except Exception:
             pass
-        content.setPadding(_dp(16), _statusbar_pad() + _dp(10), _dp(16), bottom_safe_pad)
+        content.setPadding(_dp(self._ui_pad), _statusbar_pad() + _dp(10), _dp(self._ui_pad), bottom_safe_pad)
         overlay.addView(content)
 
         top = LinearLayout(activity)
@@ -2905,7 +2958,7 @@ class Plugin(BasePlugin):
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
         ))
-        content.setPadding(_dp(16), _statusbar_pad() + _dp(10), _dp(16), _dp(14))
+        content.setPadding(_dp(self._ui_pad), _statusbar_pad() + _dp(10), _dp(self._ui_pad), _dp(14))
         overlay.addView(content)
 
         top = LinearLayout(activity)
@@ -3112,7 +3165,7 @@ class Plugin(BasePlugin):
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
         ))
-        content.setPadding(_dp(16), _statusbar_pad() + _dp(10), _dp(16), _dp(14))
+        content.setPadding(_dp(self._ui_pad), _statusbar_pad() + _dp(10), _dp(self._ui_pad), _dp(14))
         overlay.addView(content)
 
         top = LinearLayout(activity)
@@ -3282,7 +3335,7 @@ class Plugin(BasePlugin):
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
         ))
-        content.setPadding(_dp(16), _statusbar_pad() + _dp(10), _dp(16), _dp(14))
+        content.setPadding(_dp(self._ui_pad), _statusbar_pad() + _dp(10), _dp(self._ui_pad), _dp(14))
         overlay.addView(content)
 
         top = LinearLayout(activity)
@@ -3482,7 +3535,7 @@ class Plugin(BasePlugin):
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
         ))
-        content.setPadding(_dp(16), _statusbar_pad() + _dp(10), _dp(16), _dp(14))
+        content.setPadding(_dp(self._ui_pad), _statusbar_pad() + _dp(10), _dp(self._ui_pad), _dp(14))
         overlay.addView(content)
 
         top = LinearLayout(activity)
@@ -3926,10 +3979,82 @@ class Plugin(BasePlugin):
         except Exception as e:
             log(f"[RSS] settings seekbar bind error: {e}")
 
+        # --- UI padding ---
+        hint_pad = TextView(ctx)
+        hint_pad.setText(_tr("Отступ интерфейса (dp)", "Interface padding (dp)"))
+        hint_pad.setTextSize(13)
+        hint_pad.setTextColor(_c("#FFFFFFFF"))
+        hint_pad.setAlpha(0.75)
+        hint_pad.setPadding(0, _dp(8), 0, _dp(10))
+        self._list_container.addView(hint_pad)
+
+        card_pad = LinearLayout(ctx)
+        card_pad.setOrientation(LinearLayout.VERTICAL)
+        card_pad.setPadding(_dp(12), _dp(12), _dp(12), _dp(12))
+        card_pad.setBackground(self._bg_rounded("#1E1AFFFFFF", "#24FFFFFF", 0.0))
+        lp_card_pad = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp_card_pad.bottomMargin = _dp(12)
+        self._list_container.addView(card_pad, lp_card_pad)
+
+        val_pad_tv = TextView(ctx)
+        val_pad_tv.setText((_tr("Текущий отступ", "Current padding") + f": {int(self._ui_pad)}dp"))
+        val_pad_tv.setTextSize(14)
+        val_pad_tv.setTextColor(_c("#FFFFFFFF"))
+        val_pad_tv.setTypeface(None, Typeface.BOLD)
+        val_pad_tv.setPadding(0, 0, 0, _dp(8))
+        card_pad.addView(val_pad_tv)
+
+        sb_pad = SeekBar(ctx)
+        max_pad_progress = max(1, self._ui_pad_to_progress(_UI_PAD_MAX))
+        cur_pad_progress = self._ui_pad_to_progress(self._ui_pad)
+        try:
+            sb_pad.setMax(max_pad_progress)
+            sb_pad.setProgress(max(0, min(max_pad_progress, cur_pad_progress)))
+        except Exception:
+            pass
+        card_pad.addView(sb_pad, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+
+        pad_range = TextView(ctx)
+        pad_range.setText((_tr("Диапазон", "Range") + f": {_UI_PAD_MIN}dp - {_UI_PAD_MAX}dp"))
+        pad_range.setTextSize(12)
+        pad_range.setTextColor(_c("#FFFFFFFF"))
+        pad_range.setAlpha(0.62)
+        pad_range.setPadding(0, _dp(6), 0, 0)
+        card_pad.addView(pad_range)
+
+        def on_pad_progress(_sb, progress, from_user):
+            try:
+                if not from_user:
+                    return
+                val = self._progress_to_ui_pad(int(progress))
+                val_pad_tv.setText((_tr("Текущий отступ", "Current padding") + f": {int(val)}dp"))
+            except Exception:
+                pass
+
+        def on_pad_stop(_sb):
+            try:
+                val = self._progress_to_ui_pad(int(_sb.getProgress() or 0))
+                self._apply_ui_pad_and_reopen(val)
+            except Exception:
+                pass
+
+        try:
+            self._ui_pad_seek_listener = _OnSeekBarChangeListener(on_pad_progress, None, on_pad_stop)
+            sb_pad.setOnSeekBarChangeListener(self._ui_pad_seek_listener)
+        except Exception as e:
+            log(f"[RSS] settings pad seekbar bind error: {e}")
+
         reset_btn = self._primary_button(ctx, _tr("Сбросить: 100%", "Reset: 100%"), lambda: self._apply_ui_scale_and_reopen(1.0))
         self._list_container.addView(reset_btn, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ))
+
+        reset_pad_btn = self._primary_button(ctx, _tr("Сбросить отступ: 16dp", "Reset padding: 16dp"), lambda: self._apply_ui_pad_and_reopen(16))
+        lp_reset_pad = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp_reset_pad.topMargin = _dp(8)
+        self._list_container.addView(reset_pad_btn, lp_reset_pad)
 
     def _render_subs(self, ctx):
         entries = self._get_sub_entries()
