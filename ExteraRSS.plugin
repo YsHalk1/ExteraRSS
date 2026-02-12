@@ -376,10 +376,12 @@ def _statusbar_pad() -> int:
 def _norm_sub(line: str) -> Optional[str]:
     """
     Valid:
-    - tguser:username  (already normalized)
-    - @username        -> tguser:username
-    - t.me/s/username  -> tguser:username
-    - https://...      -> https://...
+    - tguser:username                 (already normalized)
+    - @username                       -> tguser:username
+    - username                        -> tguser:username
+    - t.me/s/username                 -> tguser:username
+    - t.me/username, telegram.me/...  -> tguser:username
+    - https://... (non-tg links)      -> https://...
     """
     if not isinstance(line, str):
         return None
@@ -387,27 +389,51 @@ def _norm_sub(line: str) -> Optional[str]:
     if not s:
         return None
 
+    def _norm_username(u: str) -> Optional[str]:
+        x = str(u or "").strip().strip("/")
+        if not x:
+            return None
+        # убрать query/hash, если прилетели из ссылки
+        x = x.split("?", 1)[0].split("#", 1)[0].strip()
+        # поддержка @username
+        if x.startswith("@"):
+            x = x[1:].strip()
+        if not x:
+            return None
+        if re.match(r"^[A-Za-z][A-Za-z0-9_]{3,31}$", x):
+            return "tguser:" + x
+        return None
+
     if s.startswith("tguser:"):
         u = s.split(":", 1)[1].strip()
-        return ("tguser:" + u) if u else None
+        return _norm_username(u)
 
     if s.startswith("@"):
-        u = s[1:].strip()
-        return ("tguser:" + u) if u else None
+        return _norm_username(s)
 
-    if s.startswith("t.me/s/") or s.startswith("telegram.me/s/"):
-        u = s.split("/s/", 1)[1].strip("/ ")
-        return ("tguser:" + u) if u else None
+    low = s.lower()
 
-    if s.startswith("http://") or s.startswith("https://"):
-        low = s.lower()
-        if "t.me/s/" in low:
-            try:
-                u = s.split("t.me/s/", 1)[1].strip("/ ")
-                return ("tguser:" + u) if u else None
-            except Exception:
-                pass
+    if low.startswith("t.me/s/") or low.startswith("telegram.me/s/"):
+        return _norm_username(s.split("/s/", 1)[1])
+
+    if low.startswith("t.me/") or low.startswith("telegram.me/"):
+        # обычная ссылка канала/профиля без схемы
+        m = re.match(r"^(?:t\.me|telegram\.me)/(?:s/)?([^/?#]+)", s, re.I)
+        if m:
+            return _norm_username(m.group(1) or "")
+        return None
+
+    if low.startswith("http://") or low.startswith("https://"):
+        # tg-ссылки в полном формате
+        m = re.match(r"^https?://(?:www\.)?(?:t\.me|telegram\.me)/(?:s/)?([^/?#]+)", s, re.I)
+        if m:
+            return _norm_username(m.group(1) or "")
         return s
+
+    # fallback: если просто username без @
+    u = _norm_username(s)
+    if u:
+        return u
 
     return None
 
@@ -2785,14 +2811,14 @@ class Plugin(BasePlugin):
         content.addView(h)
 
         lbl = TextView(activity)
-        lbl.setText("Адрес RSS (или @username для Telegram)")
+        lbl.setText("Адрес RSS (или username/@username/ссылка Telegram)")
         lbl.setTextSize(13)
         lbl.setTextColor(_c("#FFFFFFFF"))
         lbl.setAlpha(0.85)
         content.addView(lbl)
 
         url_input = EditText(activity)
-        url_input.setHint("https://site.com/rss  или  @channel")
+        url_input.setHint("https://site.com/rss  или  @channel / channel / t.me/channel")
         url_input.setSingleLine(True)
         url_input.setPadding(_dp(12), _dp(12), _dp(12), _dp(12))
         url_input.setTextColor(_c("#FFFFFFFF"))
@@ -3786,7 +3812,7 @@ class Plugin(BasePlugin):
 
         if not entries:
             t = TextView(ctx)
-            t.setText("Подписок нет.\nНажми «+» и вставь RSS или @username.")
+            t.setText("Подписок нет.\nНажми «+» и вставь RSS или username/@username/ссылку.")
             t.setTextSize(14)
             t.setTextColor(_c("#FFFFFFFF"))
             t.setAlpha(0.75)
