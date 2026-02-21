@@ -1063,6 +1063,7 @@ class Plugin(BasePlugin):
         self._accent_seek_listener = None
         self._suppress_open_refresh_once = False
         self._bg_thread_running = False
+        self._unread_new_posts = max(0, int(self.get_setting("rss_unread_new", "0") or 0))
 
     # ---- Animations Helpers ----
     def _reset_press_state(self, v: Optional[View]):
@@ -1083,8 +1084,8 @@ class Plugin(BasePlugin):
         except Exception:
             pass
         try:
-            v.animate().scaleX(0.92).scaleY(0.92).setDuration(80).withEndAction(
-                Runnable(lambda: self._reset_press_state(v))
+            v.animate().scaleX(0.93).scaleY(0.93).setDuration(70).withEndAction(
+                Runnable(lambda: v.animate().scaleX(1.0).scaleY(1.0).setDuration(130).withEndAction(Runnable(lambda: self._reset_press_state(v))).start())
             ).start()
         except Exception:
             self._reset_press_state(v)
@@ -1324,9 +1325,20 @@ class Plugin(BasePlugin):
             self._open(fragment)
             if mode_now != "feed": self._set_mode(mode_now)
 
+    def _set_unread_count(self, value: int, persist: bool = True):
+        try: n = max(0, int(value))
+        except Exception: n = 0
+        self._unread_new_posts = n
+        if persist:
+            try: self.set_setting("rss_unread_new", str(n))
+            except Exception: pass
+        self._install_drawer_item()
+
     # ---------- lifecycle ----------
     def on_plugin_load(self):
         self._reload_ui_scale_from_settings()
+        try: self._unread_new_posts = max(0, int(self.get_setting("rss_unread_new", "0") or 0))
+        except Exception: self._unread_new_posts = 0
         self._install_drawer_item()
         self._bg_thread_running = True
         threading.Thread(target=self._bg_worker, daemon=True).start()
@@ -1360,6 +1372,10 @@ class Plugin(BasePlugin):
         new_keys = set(str(x.get("tg_post_id") or x.get("link") or "") for x in new_cache)
         diff = {k for k in (new_keys - old_keys) if k}
         if diff:
+            if self._overlay is None:
+                self._set_unread_count(self._unread_new_posts + len(diff), persist=True)
+            else:
+                self._set_unread_count(0, persist=True)
             def show_toast():
                 try: Toast.makeText(ApplicationLoader.applicationContext, _tr(f"ExteraRSS: {len(diff)} новых постов!", f"ExteraRSS: {len(diff)} new posts!"), Toast.LENGTH_LONG).show()
                 except Exception: pass
@@ -1388,7 +1404,10 @@ class Plugin(BasePlugin):
     # ---------- drawer ----------
     def _install_drawer_item(self):
         try:
-            item = MenuItemData(menu_type=MenuItemType.DRAWER_MENU, text=_tr("Моя лента", "My Feed"), on_click=lambda ctx: self._open(ctx.get("fragment") or get_last_fragment()), icon="msg_list", item_id="rss_my_feed_drawer", subtext="RSS/Atom + Telegram", priority=980)
+            unread = max(0, int(self._unread_new_posts))
+            base = _tr("Моя лента", "My Feed")
+            txt = (f"{base} +{unread}") if unread > 0 else base
+            item = MenuItemData(menu_type=MenuItemType.DRAWER_MENU, text=txt, on_click=lambda ctx: self._open(ctx.get("fragment") or get_last_fragment()), icon="msg_list", item_id="rss_my_feed_drawer", subtext="RSS/Atom + Telegram", priority=980)
             self.add_menu_item(item)
         except Exception: pass
 
@@ -1480,6 +1499,7 @@ class Plugin(BasePlugin):
                     if not at_top: self._pull_armed = False
                     elif dy > float(_dp(80)) and dy > abs(dx):
                         self._pull_armed = False
+                        self._gesture_switched = True
                         try: self._main_scroll.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                         except Exception: pass
                         self._set_refreshing_ui(True)
@@ -1626,7 +1646,7 @@ class Plugin(BasePlugin):
         opts = self._source_filter_options()
         self._source_filter = val if val in opts else ""
         self._update_source_button()
-        self._animate_list_once = True
+        self._animate_list_once = False
         self._render()
 
     def _set_category_filter(self, category_value: str):
@@ -1634,7 +1654,7 @@ class Plugin(BasePlugin):
         opts = self._category_filter_options()
         self._category_filter = val if val in opts else ""
         self._update_source_button()
-        self._animate_list_once = True
+        self._animate_list_once = False
         self._render()
 
     def _open_top_filter_picker(self):
@@ -1965,6 +1985,8 @@ class Plugin(BasePlugin):
     # ---------- MAIN SCREEN ----------
     def _open(self, fragment):
         self._reload_ui_scale_from_settings()
+        if self._unread_new_posts > 0:
+            self._set_unread_count(0, persist=True)
         if self._overlay is not None: return
         if not fragment: fragment = get_last_fragment()
         if not fragment: return
@@ -2102,6 +2124,7 @@ class Plugin(BasePlugin):
         try:
             self._main_touch_listener = _OnTouchListener(self._handle_global_touch)
             sv.setOnTouchListener(self._main_touch_listener)
+            overlay.setOnTouchListener(self._main_touch_listener)
         except Exception:
             self._main_touch_listener = None
 
@@ -2157,7 +2180,7 @@ class Plugin(BasePlugin):
         prev_idx = self._mode_index(self._mode)
         self._mode = mode
         new_idx = self._mode_index(mode)
-        self._animate_list_once = True
+        self._animate_list_once = False
         self._update_source_button()
         self._update_bottom_nav_state()
         container = self._list_container
@@ -2170,12 +2193,7 @@ class Plugin(BasePlugin):
         self._animate_selected_nav()
         try:
             container.setAlpha(1.0)
-            direction = 1 if new_idx > prev_idx else -1
-            container.setTranslationX(float(direction * _dp(30)))
-            anim_in = container.animate().translationX(0.0).setDuration(220)
-            try: anim_in.setInterpolator(DecelerateInterpolator())
-            except Exception: pass
-            anim_in.start()
+            container.setTranslationX(0.0)
         except Exception: pass
 
     # ---------- Add feed screen ----------
@@ -2662,7 +2680,7 @@ class Plugin(BasePlugin):
         url = _upgrade_image_url(url)
         if not url: return
         with self._img_cache_lock: bmp = self._img_cache.get(url)
-        if bmp is not None and not quick_preview:
+        if bmp is not None:
             try: iv.setImageBitmap(bmp); iv.setVisibility(View.VISIBLE)
             except Exception: pass
             if loading_label is not None:
@@ -2721,7 +2739,9 @@ class Plugin(BasePlugin):
                 bmp2 = decode_full(data)
                 if bmp2 is None: return
                 with self._img_cache_lock:
-                    if len(self._img_cache) > 80: self._img_cache.clear()
+                    if len(self._img_cache) > 240:
+                        try: self._img_cache.pop(next(iter(self._img_cache)))
+                        except Exception: pass
                     self._img_cache[url] = bmp2
 
                 def ui():
