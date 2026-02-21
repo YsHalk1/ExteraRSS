@@ -184,6 +184,17 @@ def _mix_hex(c1: Any, c2: Any, ratio: float) -> str:
     except Exception:
         return a
 
+
+def _with_alpha(c: Any, alpha: int) -> str:
+    base = _norm_accent_hex(c)
+    try:
+        a = int(alpha)
+    except Exception:
+        a = 255
+    if a < 0: a = 0
+    if a > 255: a = 255
+    return f"#{a:02X}{base[3:]}"
+
 def _clamp_ui_scale(v: Any) -> float:
     try:
         x = float(v)
@@ -1176,10 +1187,10 @@ class Plugin(BasePlugin):
 
     def _bg_important_gradient(self):
         try:
-            accent = self._accent()
-            grad_top = _mix_hex(accent, "#FF2A1A3A", 0.58)
-            grad_bottom = _mix_hex(accent, "#FF1A1224", 0.76)
-            grad_stroke = _mix_hex(accent, "#FF4A2555", 0.35)
+            accent_soft = _with_alpha(self._accent(), 110)
+            grad_top = _mix_hex(accent_soft, "#FF2A1A3A", 0.62)
+            grad_bottom = _mix_hex(accent_soft, "#FF1A1224", 0.80)
+            grad_stroke = _mix_hex(accent_soft, "#FF4A2555", 0.45)
             bg = GradientDrawable(
                 GradientDrawable.Orientation.TL_BR,
                 [_c(grad_top), _c(grad_bottom)]
@@ -1188,7 +1199,7 @@ class Plugin(BasePlugin):
             bg.setStroke(_dp(0.5), _c(grad_stroke))
             return bg
         except Exception:
-            return self._bg_rounded(_mix_hex(self._accent(), "#FF1A1224", 0.72), _mix_hex(self._accent(), "#FF4A2555", 0.35), 0.5, radius_dp=CORNER_RADIUS_DP)
+            return self._bg_rounded(_mix_hex(_with_alpha(self._accent(), 110), "#FF1A1224", 0.75), _mix_hex(_with_alpha(self._accent(), 110), "#FF4A2555", 0.45), 0.5, radius_dp=CORNER_RADIUS_DP)
 
     def _bg_pill(self, fill_hex: str, stroke_hex: str = "#00000000", stroke_dp: float = 0.0):
         bg = GradientDrawable()
