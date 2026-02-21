@@ -186,15 +186,15 @@ def _clamp_ui_pad(v: Any) -> int:
     return x
 
 
-def _clamp_bg_refresh_minutes(v: Any) -> int:
+def _clamp_bg_refresh_seconds(v: Any) -> int:
     try:
         x = int(round(float(v)))
     except Exception:
-        x = 3
-    if x < 1:
-        x = 1
-    if x > 30:
-        x = 30
+        x = 180
+    if x < 10:
+        x = 10
+    if x > 1800:
+        x = 1800
     return x
 
 def _is_ru_locale() -> bool:
@@ -1375,10 +1375,13 @@ class Plugin(BasePlugin):
             warmup = 0
             if step <= 0:
                 try:
-                    mins = _clamp_bg_refresh_minutes(self.get_setting("bg_refresh_minutes", "3"))
+                    raw_sec = self.get_setting("bg_refresh_seconds", None)
+                    if raw_sec is None:
+                        raw_min = self.get_setting("bg_refresh_minutes", "3")
+                        raw_sec = int(round(float(raw_min) * 60.0))
+                    step = _clamp_bg_refresh_seconds(raw_sec)
                 except Exception:
-                    mins = 3
-                step = mins * 60
+                    step = 180
             for _ in range(step):
                 if not self._bg_thread_running: return
                 time.sleep(1)
@@ -2677,6 +2680,21 @@ class Plugin(BasePlugin):
         open_btn = self._top_button(activity, _tr("Браузер", "Browser"), lambda: self._open_link(get_last_fragment(), url))
         top.addView(open_btn)
 
+        zoom_row = LinearLayout(activity)
+        zoom_row.setOrientation(LinearLayout.HORIZONTAL)
+        zoom_row.setGravity(Gravity.CENTER_VERTICAL)
+        zoom_row.setPadding(0, _dp(8), 0, _dp(4))
+        content.addView(zoom_row)
+
+        zoom_out_btn = self._top_button(activity, " − ", lambda: None)
+        zoom_in_btn = self._top_button(activity, " + ", lambda: None)
+        zoom_reset_btn = self._top_button(activity, _tr("100%", "100%"), lambda: None)
+        zoom_row.addView(zoom_out_btn)
+        zoom_row.addView(self._spacer_h(activity, 8))
+        zoom_row.addView(zoom_reset_btn)
+        zoom_row.addView(self._spacer_h(activity, 8))
+        zoom_row.addView(zoom_in_btn)
+
         iv = ImageView(activity)
         iv.setVisibility(View.GONE)
         iv.setAdjustViewBounds(True)
@@ -2685,6 +2703,16 @@ class Plugin(BasePlugin):
         iv.setBackground(self._bg_rounded("#00000000"))
 
         zoom = {"scale": 1.0, "base_dist": 0.0}
+        def _apply_zoom(ns: float):
+            if ns < 1.0: ns = 1.0
+            if ns > 4.0: ns = 4.0
+            zoom["scale"] = ns
+            try:
+                iv.setScaleX(ns)
+                iv.setScaleY(ns)
+            except Exception:
+                pass
+
         def _dist(ev):
             try:
                 if int(ev.getPointerCount()) < 2: return 0.0
@@ -2696,35 +2724,46 @@ class Plugin(BasePlugin):
 
         def _on_img_touch(_v, ev):
             try:
-                act = int(ev.getActionMasked())
+                try: act = int(ev.getActionMasked())
+                except Exception: act = int(ev.getAction())
+                pcount = int(ev.getPointerCount())
             except Exception:
-                try: act = int(ev.getAction())
-                except Exception: act = -1
+                return False
             try:
-                if act == int(MotionEvent.ACTION_POINTER_DOWN):
+                if pcount >= 2 and act in (int(MotionEvent.ACTION_DOWN), int(MotionEvent.ACTION_POINTER_DOWN), int(MotionEvent.ACTION_MOVE)):
+                    try:
+                        par = iv.getParent()
+                        if par is not None: par.requestDisallowInterceptTouchEvent(True)
+                    except Exception:
+                        pass
+                if act in (int(MotionEvent.ACTION_POINTER_DOWN), int(MotionEvent.ACTION_DOWN)) and pcount >= 2:
                     zoom["base_dist"] = _dist(ev)
                     return True
-                if act == int(MotionEvent.ACTION_MOVE) and int(ev.getPointerCount()) >= 2:
+                if act == int(MotionEvent.ACTION_MOVE) and pcount >= 2:
                     d = _dist(ev)
                     bd = float(zoom.get("base_dist", 0.0))
                     if bd > 0.0 and d > 0.0:
-                        ns = float(zoom.get("scale", 1.0)) * (d / bd)
-                        if ns < 1.0: ns = 1.0
-                        if ns > 4.0: ns = 4.0
-                        zoom["scale"] = ns
+                        _apply_zoom(float(zoom.get("scale", 1.0)) * (d / bd))
                         zoom["base_dist"] = d
-                        iv.setScaleX(ns)
-                        iv.setScaleY(ns)
                     return True
-                if act in (int(MotionEvent.ACTION_UP), int(MotionEvent.ACTION_CANCEL)):
+                if act in (int(MotionEvent.ACTION_POINTER_UP), int(MotionEvent.ACTION_UP), int(MotionEvent.ACTION_CANCEL)):
                     zoom["base_dist"] = 0.0
-                    if float(zoom.get("scale", 1.0)) <= 1.02:
-                        zoom["scale"] = 1.0
-                        iv.setScaleX(1.0); iv.setScaleY(1.0)
-                    return False
+                    if float(zoom.get("scale", 1.0)) <= 1.01:
+                        _apply_zoom(1.0)
+                    return bool(float(zoom.get("scale", 1.0)) > 1.0)
             except Exception:
                 return False
-            return False
+            return bool(float(zoom.get("scale", 1.0)) > 1.0)
+
+        def _zoom_step(delta: float):
+            _apply_zoom(float(zoom.get("scale", 1.0)) + delta)
+
+        try: zoom_out_btn.setOnClickListener(OnClickListener(lambda _v: _zoom_step(-0.25)))
+        except Exception: pass
+        try: zoom_in_btn.setOnClickListener(OnClickListener(lambda _v: _zoom_step(0.25)))
+        except Exception: pass
+        try: zoom_reset_btn.setOnClickListener(OnClickListener(lambda _v: _apply_zoom(1.0)))
+        except Exception: pass
 
         try: iv.setOnTouchListener(_OnTouchListener(_on_img_touch))
         except Exception: pass
@@ -3115,7 +3154,7 @@ class Plugin(BasePlugin):
         self._list_container.addView(reset_btn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
         bg_hint = TextView(ctx)
-        bg_hint.setText(_tr("Интервал автообновления в фоне (мин)", "Background auto-refresh interval (min)"))
+        bg_hint.setText(_tr("Интервал автообновления в фоне (сек)", "Background auto-refresh interval (sec)"))
         bg_hint.setTextSize(14)
         bg_hint.setTextColor(_c(COLOR_TEXT_SEC))
         bg_hint.setPadding(_dp(4), _dp(20), 0, _dp(8))
@@ -3129,9 +3168,13 @@ class Plugin(BasePlugin):
         lp_bg.bottomMargin = _dp(16)
         self._list_container.addView(bg_card, lp_bg)
 
-        cur_bg = _clamp_bg_refresh_minutes(self.get_setting("bg_refresh_minutes", "3"))
+        raw_bg = self.get_setting("bg_refresh_seconds", None)
+        if raw_bg is None:
+            try: raw_bg = int(round(float(self.get_setting("bg_refresh_minutes", "3")) * 60.0))
+            except Exception: raw_bg = 180
+        cur_bg = _clamp_bg_refresh_seconds(raw_bg)
         bg_tv = TextView(ctx)
-        bg_tv.setText((_tr("Текущее значение", "Current value") + f": {cur_bg} мин"))
+        bg_tv.setText((_tr("Текущее значение", "Current value") + f": {cur_bg} сек"))
         bg_tv.setTextSize(16)
         bg_tv.setTextColor(_c(COLOR_TEXT_PR))
         bg_tv.setTypeface(None, Typeface.BOLD)
@@ -3140,23 +3183,24 @@ class Plugin(BasePlugin):
 
         sb_bg = SeekBar(ctx)
         try:
-            sb_bg.setMax(29)
-            sb_bg.setProgress(max(0, min(29, cur_bg - 1)))
+            sb_bg.setMax(179)
+            sb_bg.setProgress(max(0, min(179, int((cur_bg - 10) / 10))))
         except Exception: pass
         bg_card.addView(sb_bg, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
         def on_bg_progress(_sb, progress, from_user):
             try:
                 if not from_user: return
-                val = max(1, min(30, int(progress) + 1))
-                bg_tv.setText((_tr("Текущее значение", "Current value") + f": {val} мин"))
+                val = max(10, min(1800, (int(progress) + 1) * 10))
+                bg_tv.setText((_tr("Текущее значение", "Current value") + f": {val} сек"))
             except Exception: pass
 
         def on_bg_stop(_sb):
             try:
-                val = max(1, min(30, int(_sb.getProgress() or 0) + 1))
-                self.set_setting("bg_refresh_minutes", str(val))
-                bg_tv.setText((_tr("Текущее значение", "Current value") + f": {val} мин"))
+                val = max(10, min(1800, (int(_sb.getProgress() or 0) + 1) * 10))
+                self.set_setting("bg_refresh_seconds", str(val))
+                self.set_setting("bg_refresh_minutes", str(int(round(float(val) / 60.0))))
+                bg_tv.setText((_tr("Текущее значение", "Current value") + f": {val} сек"))
             except Exception: pass
 
         try:
