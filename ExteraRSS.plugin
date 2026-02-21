@@ -70,6 +70,17 @@ except ImportError:
             return bool(self._fn(v, key_code, event))
 
 try:
+    from android_utils import OnLongClickListener as _OnLongClickListener
+except ImportError:
+    class _OnLongClickListener(dynamic_proxy(View.OnLongClickListener)):
+        def __init__(self, fn):
+            super().__init__()
+            self._fn = fn
+
+        def onLongClick(self, v):
+            return bool(self._fn(v))
+
+try:
     from android_utils import OnSeekBarChangeListener as _OnSeekBarChangeListener
 except ImportError:
     try:
@@ -1082,6 +1093,8 @@ class Plugin(BasePlugin):
 
         self._source_filter: str = ""
         self._category_filter: str = ""
+        self._source_exclude_filter: str = ""
+        self._category_exclude_filter: str = ""
         self._source_btn: Optional[TextView] = None
         self._nav_feed_btn: Optional[TextView] = None
         self._nav_subs_btn: Optional[TextView] = None
@@ -1109,6 +1122,8 @@ class Plugin(BasePlugin):
         self._bg_thread_running = False
         self._unread_new_posts = max(0, int(self.get_setting("rss_unread_new", "0") or 0))
         self._img_preview_mode = str(self.get_setting("feed_img_preview_mode", "compact") or "compact").strip().lower()
+        self._source_exclude_filter = str(self.get_setting("source_exclude_filter", "") or "")
+        self._category_exclude_filter = _norm_category(self.get_setting("category_exclude_filter", "") or "")
         if self._img_preview_mode not in ("compact", "full"):
             self._img_preview_mode = "compact"
         self._refresh_fade_token = 0
@@ -1297,6 +1312,10 @@ class Plugin(BasePlugin):
         try: raw_mode = self.get_setting("feed_img_preview_mode", self._img_preview_mode)
         except Exception: raw_mode = self._img_preview_mode
         self._set_img_preview_mode(raw_mode, persist=False)
+        try: self._source_exclude_filter = str(self.get_setting("source_exclude_filter", self._source_exclude_filter) or "")
+        except Exception: pass
+        try: self._category_exclude_filter = _norm_category(self.get_setting("category_exclude_filter", self._category_exclude_filter) or "")
+        except Exception: pass
         try: raw_corner = self.get_setting("ui_corner_scale", f"{self._corner_scale:.2f}")
         except Exception: raw_corner = self._corner_scale
         self._set_corner_scale(raw_corner, persist=False)
@@ -1702,12 +1721,20 @@ class Plugin(BasePlugin):
         except Exception: pass
 
     def _source_filter_label(self) -> str:
+        if self._source_exclude_filter:
+            name = self._source_exclude_filter
+            if len(name) > 14: name = name[:13].rstrip() + "…"
+            return _tr(f"кроме {name} ▾", f"except {name} ▾")
         if not self._source_filter: return _tr("Все источники ▾", "All sources ▾")
         name = self._source_filter
         if len(name) > 16: name = name[:15].rstrip() + "…"
         return f"{name} ▾"
 
     def _category_filter_label(self) -> str:
+        if self._category_exclude_filter:
+            name = self._category_exclude_filter
+            if len(name) > 14: name = name[:13].rstrip() + "…"
+            return _tr(f"кроме #{name} ▾", f"except #{name} ▾")
         if not self._category_filter: return _tr("Все категории ▾", "All categories ▾")
         name = self._category_filter
         if len(name) > 16: name = name[:15].rstrip() + "…"
@@ -1753,6 +1780,9 @@ class Plugin(BasePlugin):
         val = str(source_value or "")
         opts = self._source_filter_options()
         self._source_filter = val if val in opts else ""
+        self._source_exclude_filter = ""
+        try: self.set_setting("source_exclude_filter", "")
+        except Exception: pass
         self._update_source_button()
         self._animate_list_once = False
         self._render()
@@ -1761,6 +1791,31 @@ class Plugin(BasePlugin):
         val = _norm_category(category_value)
         opts = self._category_filter_options()
         self._category_filter = val if val in opts else ""
+        self._category_exclude_filter = ""
+        try: self.set_setting("category_exclude_filter", "")
+        except Exception: pass
+        self._update_source_button()
+        self._animate_list_once = False
+        self._render()
+
+    def _set_source_exclude_filter(self, source_value: str):
+        val = str(source_value or "")
+        opts = self._source_filter_options()
+        self._source_exclude_filter = val if val in opts else ""
+        self._source_filter = ""
+        try: self.set_setting("source_exclude_filter", self._source_exclude_filter)
+        except Exception: pass
+        self._update_source_button()
+        self._animate_list_once = False
+        self._render()
+
+    def _set_category_exclude_filter(self, category_value: str):
+        val = _norm_category(category_value)
+        opts = self._category_filter_options()
+        self._category_exclude_filter = val if val in opts else ""
+        self._category_filter = ""
+        try: self.set_setting("category_exclude_filter", self._category_exclude_filter)
+        except Exception: pass
         self._update_source_button()
         self._animate_list_once = False
         self._render()
@@ -1770,7 +1825,7 @@ class Plugin(BasePlugin):
         if self._mode == "cats": self._open_category_picker_screen()
         else: self._open_source_picker_screen()
 
-    def _open_picker_screen(self, picker_title: str, options: List[Tuple[str, str]], current_value: str, on_select):
+    def _open_picker_screen(self, picker_title: str, options: List[Tuple[str, str]], current_value: str, on_select, on_long_select=None):
         if self._src_overlay is not None: return
         fragment = get_last_fragment()
         if not fragment: return
@@ -1802,8 +1857,15 @@ class Plugin(BasePlugin):
         title_tv.setTextSize(22)
         title_tv.setTypeface(None, Typeface.BOLD)
         title_tv.setTextColor(_c(COLOR_TEXT_PR))
-        title_tv.setPadding(_dp(8), 0, _dp(8), _dp(16))
+        title_tv.setPadding(_dp(8), 0, _dp(8), _dp(8))
         card.addView(title_tv)
+
+        hint_tv = TextView(activity)
+        hint_tv.setText(_tr("Долгое нажатие: исключить", "Long press: exclude"))
+        hint_tv.setTextSize(12)
+        hint_tv.setTextColor(_c(COLOR_TEXT_SEC))
+        hint_tv.setPadding(_dp(8), 0, _dp(8), _dp(12))
+        card.addView(hint_tv)
 
         sv = ScrollView(activity)
         sv.setLayoutParams(LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
@@ -1835,6 +1897,21 @@ class Plugin(BasePlugin):
                 return _click
 
             btn.setOnClickListener(OnClickListener(make_on_select(value)))
+
+            if on_long_select is not None and value:
+                def make_on_long(v_val):
+                    def _long(_v):
+                        self._bounce_anim(_v)
+                        try:
+                            on_long_select(v_val)
+                            self._close_source_picker_screen(animated=True)
+                            return True
+                        except Exception:
+                            return False
+                    return _long
+                try: btn.setOnLongClickListener(_OnLongClickListener(make_on_long(value)))
+                except Exception: pass
+
             lp_btn = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             lp_btn.bottomMargin = _dp(8)
             col.addView(btn, lp_btn)
@@ -1855,13 +1932,13 @@ class Plugin(BasePlugin):
         vals = self._source_filter_options()
         options = [("", _tr("Все источники", "All sources"))] + [(x, x) for x in vals if x]
         cur = self._source_filter if self._source_filter in vals else ""
-        self._open_picker_screen(_tr("Выбор источника", "Select source"), options, cur, self._set_source_filter)
+        self._open_picker_screen(_tr("Выбор источника", "Select source"), options, cur, self._set_source_filter, self._set_source_exclude_filter)
 
     def _open_category_picker_screen(self):
         vals = self._category_filter_options()
         options = [("", _tr("Все категории", "All categories"))] + [(x, x) for x in vals if x]
         cur = self._category_filter if self._category_filter in vals else ""
-        self._open_picker_screen(_tr("Выбор категории", "Select category"), options, cur, self._set_category_filter)
+        self._open_picker_screen(_tr("Выбор категории", "Select category"), options, cur, self._set_category_filter, self._set_category_exclude_filter)
 
     def _close_source_picker_screen(self, animated: bool):
         overlay = self._src_overlay
@@ -2998,6 +3075,9 @@ class Plugin(BasePlugin):
             if self._category_filter:
                 filt = self._category_filter
                 items = [it for it in all_items if _norm_category(it.get("category", "")) == filt]
+            elif self._category_exclude_filter:
+                excl = self._category_exclude_filter
+                items = [it for it in all_items if _norm_category(it.get("category", "")) != excl]
         else:
             if self._source_filter:
                 filt = self._source_filter
@@ -3006,6 +3086,13 @@ class Plugin(BasePlugin):
                     src_val = _format_source_line(it).strip()
                     if not src_val: src_val = str(it.get("source", "") or "").strip()
                     if src_val == filt: items.append(it)
+            elif self._source_exclude_filter:
+                excl = self._source_exclude_filter
+                items = []
+                for it in all_items:
+                    src_val = _format_source_line(it).strip()
+                    if not src_val: src_val = str(it.get("source", "") or "").strip()
+                    if src_val != excl: items.append(it)
 
         if not items:
             t = TextView(ctx)
@@ -3017,7 +3104,7 @@ class Plugin(BasePlugin):
 
         if by_category:
             info = TextView(ctx)
-            info.setText((_tr("Категория", "Category") + f": {self._category_filter}") if self._category_filter else (_tr("Все категории", "All categories")))
+            info.setText((_tr("Категория", "Category") + f": {self._category_filter}") if self._category_filter else ((_tr("Исключая", "Excluding") + f": #{self._category_exclude_filter}") if self._category_exclude_filter else (_tr("Все категории", "All categories"))))
             info.setTextSize(14); info.setTypeface(None, Typeface.BOLD); info.setTextColor(_c(self._accent()))
             info.setPadding(_dp(4), 0, 0, _dp(16))
             self._list_container.addView(info)
