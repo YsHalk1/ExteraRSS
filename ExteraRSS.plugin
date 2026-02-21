@@ -2,6 +2,7 @@ import json
 import time
 import threading
 import urllib.request
+import urllib.parse
 import xml.etree.ElementTree as ET
 import re
 from typing import Any, Dict, List, Optional, Tuple
@@ -16,12 +17,17 @@ from org.telegram.messenger import AndroidUtilities
 
 from android.graphics import Color
 from android.graphics import BitmapFactory
+from android.graphics import Typeface
+try:
+    from android.graphics import Bitmap
+except Exception:
+    Bitmap = None
 from android.graphics.drawable import GradientDrawable
 from android.view import Gravity, View, ViewGroup, ViewOutlineProvider
 from android.view import HapticFeedbackConstants
 from android.view.animation import DecelerateInterpolator
 
-from android.widget import FrameLayout, LinearLayout, ScrollView, TextView, ImageView, EditText
+from android.widget import FrameLayout, LinearLayout, ScrollView, TextView, ImageView, EditText, SeekBar
 from android.content import Intent
 from android.net import Uri
 
@@ -29,7 +35,12 @@ from datetime import datetime, timezone
 
 from java import dynamic_proxy
 from java.lang import Runnable
-from android.view import MotionEvent, KeyEvent
+from android.view import MotionEvent, KeyEvent, ViewConfiguration, KeyCharacterMap
+
+try:
+    from java.util import Locale as JavaLocale
+except Exception:
+    JavaLocale = None
 from android.widget import ProgressBar
 
 try:
@@ -54,17 +65,126 @@ except ImportError:
         def onKey(self, v, key_code, event):
             return bool(self._fn(v, key_code, event))
 
+try:
+    from android_utils import OnSeekBarChangeListener as _OnSeekBarChangeListener
+except ImportError:
+    try:
+        class _OnSeekBarChangeListener(dynamic_proxy(SeekBar.OnSeekBarChangeListener)):
+            def __init__(self, on_change=None, on_start=None, on_stop=None):
+                super().__init__()
+                self._on_change = on_change
+                self._on_start = on_start
+                self._on_stop = on_stop
+
+            def onProgressChanged(self, seek_bar, progress, from_user):
+                try:
+                    if self._on_change is not None:
+                        self._on_change(seek_bar, int(progress), bool(from_user))
+                except Exception:
+                    pass
+
+            def onStartTrackingTouch(self, seek_bar):
+                try:
+                    if self._on_start is not None:
+                        self._on_start(seek_bar)
+                except Exception:
+                    pass
+
+            def onStopTrackingTouch(self, seek_bar):
+                try:
+                    if self._on_stop is not None:
+                        self._on_stop(seek_bar)
+                except Exception:
+                    pass
+    except Exception:
+        class _OnSeekBarChangeListener:
+            def __init__(self, on_change=None, on_start=None, on_stop=None):
+                self._on_change = on_change
+                self._on_start = on_start
+                self._on_stop = on_stop
+
 
 __id__ = "ExteraRSS"
 __name__ = "ExteraRSS"
 __description__ = "RSS + Telegram в одной ленте."
 __author__ = "@RoflPlugins"
-__version__ = "1.4.5"
-__icon__ = "msg_list"
+__version__ = "1.0"
+__icon__ = "RoflPlugins/15"
 __min_version__ = "11.12.0"
 
 # ---- UI tuning ----
-CORNER_RADIUS_DP = 10
+CORNER_RADIUS_DP = 8
+_UI_SCALE_MIN = 0.80
+_UI_SCALE_MAX = 1.35
+_UI_SCALE = 1.00
+_UI_PAD_MIN = 0
+_UI_PAD_MAX = 30
+_ROUND_PCT_MIN = 60
+_ROUND_PCT_MAX = 160
+
+
+def _clamp_ui_scale(v: Any) -> float:
+    try:
+        x = float(v)
+    except Exception:
+        x = 1.00
+    if x < _UI_SCALE_MIN:
+        x = _UI_SCALE_MIN
+    if x > _UI_SCALE_MAX:
+        x = _UI_SCALE_MAX
+    return x
+
+
+def _clamp_ui_pad(v: Any) -> int:
+    try:
+        x = int(round(float(v)))
+    except Exception:
+        x = 16
+    if x < _UI_PAD_MIN:
+        x = _UI_PAD_MIN
+    if x > _UI_PAD_MAX:
+        x = _UI_PAD_MAX
+    return x
+
+
+
+def _clamp_round_pct(v: Any) -> int:
+    try:
+        x = int(round(float(v)))
+    except Exception:
+        x = 100
+    if x < _ROUND_PCT_MIN:
+        x = _ROUND_PCT_MIN
+    if x > _ROUND_PCT_MAX:
+        x = _ROUND_PCT_MAX
+    return x
+
+
+def _norm_hex_color(v: Any, fallback: str = "#A259FF") -> str:
+    s = str(v or "").strip().upper()
+    if not s:
+        return fallback
+    if not s.startswith("#"):
+        s = "#" + s
+    if len(s) == 7:
+        return s
+    if len(s) == 9:
+        return "#" + s[-6:]
+    return fallback
+
+def _is_ru_locale() -> bool:
+    try:
+        if JavaLocale is not None:
+            lang = str(JavaLocale.getDefault().getLanguage() or "").lower()
+            return lang.startswith("ru")
+    except Exception:
+        pass
+    # безопасный дефолт
+    return True
+
+
+def _tr(ru: str, en: str) -> str:
+    return ru if _is_ru_locale() else en
 
 
 # ---------------- safe color ----------------
@@ -251,7 +371,7 @@ def _preview_text(text: str, max_len: int = 170, title: str = "") -> str:
     return t[:max_len - 1].rstrip() + "…"
 
 def _dp(x: float) -> int:
-    return AndroidUtilities.dp(float(x))
+    return AndroidUtilities.dp(float(x) * float(_UI_SCALE))
 
 
 def _safe_json_load(s: Any, default):
@@ -314,13 +434,39 @@ def _statusbar_pad() -> int:
 
 
 # ---------- normalize subscription ----------
+def _navbar_pad(ctx=None) -> int:
+    """Best-effort bottom inset for 3-button / gesture navigation areas."""
+    try:
+        if ctx is not None:
+            # Если есть физические кнопки, чаще всего нижняя inset-панель не нужна.
+            try:
+                has_menu = bool(ViewConfiguration.get(ctx).hasPermanentMenuKey())
+                has_back = bool(KeyCharacterMap.deviceHasKey(int(KeyEvent.KEYCODE_BACK)))
+                if has_menu and has_back:
+                    return 0
+            except Exception:
+                pass
+
+            res = ctx.getResources()
+            nav_id = int(res.getIdentifier("navigation_bar_height", "dimen", "android") or 0)
+            if nav_id > 0:
+                px = int(res.getDimensionPixelSize(nav_id) or 0)
+                if px > 0:
+                    return px
+    except Exception:
+        pass
+    return 0
+
+
 def _norm_sub(line: str) -> Optional[str]:
     """
     Valid:
-    - tguser:username  (already normalized)
-    - @username        -> tguser:username
-    - t.me/s/username  -> tguser:username
-    - https://...      -> https://...
+    - tguser:username                 (already normalized)
+    - @username                       -> tguser:username
+    - username                        -> tguser:username
+    - t.me/s/username                 -> tguser:username
+    - t.me/username, telegram.me/...  -> tguser:username
+    - https://... (non-tg links)      -> https://...
     """
     if not isinstance(line, str):
         return None
@@ -328,27 +474,51 @@ def _norm_sub(line: str) -> Optional[str]:
     if not s:
         return None
 
+    def _norm_username(u: str) -> Optional[str]:
+        x = str(u or "").strip().strip("/")
+        if not x:
+            return None
+        # убрать query/hash, если прилетели из ссылки
+        x = x.split("?", 1)[0].split("#", 1)[0].strip()
+        # поддержка @username
+        if x.startswith("@"):
+            x = x[1:].strip()
+        if not x:
+            return None
+        if re.match(r"^[A-Za-z][A-Za-z0-9_]{3,31}$", x):
+            return "tguser:" + x
+        return None
+
     if s.startswith("tguser:"):
         u = s.split(":", 1)[1].strip()
-        return ("tguser:" + u) if u else None
+        return _norm_username(u)
 
     if s.startswith("@"):
-        u = s[1:].strip()
-        return ("tguser:" + u) if u else None
+        return _norm_username(s)
 
-    if s.startswith("t.me/s/") or s.startswith("telegram.me/s/"):
-        u = s.split("/s/", 1)[1].strip("/ ")
-        return ("tguser:" + u) if u else None
+    low = s.lower()
 
-    if s.startswith("http://") or s.startswith("https://"):
-        low = s.lower()
-        if "t.me/s/" in low:
-            try:
-                u = s.split("t.me/s/", 1)[1].strip("/ ")
-                return ("tguser:" + u) if u else None
-            except Exception:
-                pass
+    if low.startswith("t.me/s/") or low.startswith("telegram.me/s/"):
+        return _norm_username(s.split("/s/", 1)[1])
+
+    if low.startswith("t.me/") or low.startswith("telegram.me/"):
+        # обычная ссылка канала/профиля без схемы
+        m = re.match(r"^(?:t\.me|telegram\.me)/(?:s/)?([^/?#]+)", s, re.I)
+        if m:
+            return _norm_username(m.group(1) or "")
+        return None
+
+    if low.startswith("http://") or low.startswith("https://"):
+        # tg-ссылки в полном формате
+        m = re.match(r"^https?://(?:www\.)?(?:t\.me|telegram\.me)/(?:s/)?([^/?#]+)", s, re.I)
+        if m:
+            return _norm_username(m.group(1) or "")
         return s
+
+    # fallback: если просто username без @
+    u = _norm_username(s)
+    if u:
+        return u
 
     return None
 
@@ -359,6 +529,50 @@ def _norm_category(raw: Any) -> str:
         return ""
     s = re.sub(r"\s+", " ", s).strip()
     return s[:42]
+
+def _norm_image_url(raw: Any) -> str:
+    u = str(raw or "").strip()
+    if not u:
+        return ""
+    if u.startswith("//"):
+        u = "https:" + u
+    return u
+
+def _upgrade_image_url(raw: Any) -> str:
+    u = _norm_image_url(raw)
+    if not u:
+        return ""
+    try:
+        p = urllib.parse.urlsplit(u)
+        if not p.query:
+            return u
+        q = urllib.parse.parse_qsl(p.query, keep_blank_values=True)
+        out_q = []
+        for k, v in q:
+            lk = str(k or "").lower()
+            lv = str(v or "").lower()
+            if lk in ("w", "h", "width", "height", "size"):
+                continue
+            if lk == "name" and lv in ("small", "medium"):
+                out_q.append((k, "orig"))
+                continue
+            out_q.append((k, v))
+        new_q = urllib.parse.urlencode(out_q, doseq=True)
+        return urllib.parse.urlunsplit((p.scheme, p.netloc, p.path, new_q, p.fragment))
+    except Exception:
+        return u
+
+def _norm_images_list(raw: Any) -> List[str]:
+    arr = raw if isinstance(raw, list) else [raw]
+    out: List[str] = []
+    seen = set()
+    for x in arr:
+        u = _upgrade_image_url(x)
+        if not u or u in seen:
+            continue
+        seen.add(u)
+        out.append(u)
+    return out
 
 
 # ---------- HTML cleaning ----------
@@ -543,12 +757,17 @@ def _http_get(url: str, timeout_sec: int = 12) -> bytes:
 
 # ---------------- RSS/Atom parsing ----------------
 def _best_image_from_rss_item(it: ET.Element) -> str:
+    arr = _all_images_from_rss_item(it)
+    return arr[0] if arr else ""
+
+def _all_images_from_rss_item(it: ET.Element) -> List[str]:
+    out: List[str] = []
     try:
         for enc in it.findall("enclosure"):
             url = (enc.attrib.get("url") or "").strip()
             typ = (enc.attrib.get("type") or "").strip().lower()
             if url and (typ.startswith("image/") or url.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))):
-                return url
+                out.append(url)
     except Exception:
         pass
 
@@ -559,11 +778,11 @@ def _best_image_from_rss_item(it: ET.Element) -> str:
                 url = (el.attrib.get("url") or el.attrib.get("src") or "").strip()
                 typ = (el.attrib.get("type") or "").strip().lower()
                 if url and (typ.startswith("image/") or url.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))):
-                    return url
+                    out.append(url)
     except Exception:
         pass
 
-    return ""
+    return _norm_images_list(out)
 
 _RE_LEADING_HANDLE = re.compile(r"^\s*@[\w\d_]{3,32}\s*:\s*", re.I)
 
@@ -587,6 +806,11 @@ def _strip_leading_handle_line(s: str) -> str:
     return s
 
 def _best_image_from_atom_entry(e: ET.Element) -> str:
+    arr = _all_images_from_atom_entry(e)
+    return arr[0] if arr else ""
+
+def _all_images_from_atom_entry(e: ET.Element) -> List[str]:
+    out: List[str] = []
     try:
         for l in e.iter():
             if _strip_ns(l.tag).lower() != "link":
@@ -595,7 +819,7 @@ def _best_image_from_atom_entry(e: ET.Element) -> str:
             rel = (l.attrib.get("rel") or "").strip().lower()
             typ = (l.attrib.get("type") or "").strip().lower()
             if href and rel == "enclosure" and (typ.startswith("image/") or href.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))):
-                return href
+                out.append(href)
     except Exception:
         pass
 
@@ -606,11 +830,11 @@ def _best_image_from_atom_entry(e: ET.Element) -> str:
                 url = (el.attrib.get("url") or el.attrib.get("src") or "").strip()
                 typ = (el.attrib.get("type") or "").strip().lower()
                 if url and (typ.startswith("image/") or url.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))):
-                    return url
+                    out.append(url)
     except Exception:
         pass
 
-    return ""
+    return _norm_images_list(out)
 
 
 def parse_feed(xml_bytes: bytes, source_url: str) -> Tuple[str, List[Dict[str, Any]]]:
@@ -663,7 +887,8 @@ def parse_feed(xml_bytes: bytes, source_url: str) -> Tuple[str, List[Dict[str, A
                 except Exception:
                     pass
 
-            img = _best_image_from_rss_item(it)
+            images = _all_images_from_rss_item(it)
+            img = images[0] if images else ""
             ts = _parse_published_to_ts(pub_raw)
 
             if link:
@@ -675,6 +900,7 @@ def parse_feed(xml_bytes: bytes, source_url: str) -> Tuple[str, List[Dict[str, A
                     "source": src_title,
                     "text": desc,
                     "image": img,
+                    "images": images,
                 })
 
         return (src_title, items)
@@ -702,7 +928,8 @@ def parse_feed(xml_bytes: bytes, source_url: str) -> Tuple[str, List[Dict[str, A
                     break
 
             desc = _join_text(e.find(q("summary"))) or _join_text(e.find(q("content")))
-            img = _best_image_from_atom_entry(e)
+            images = _all_images_from_atom_entry(e)
+            img = images[0] if images else ""
             ts = _parse_published_to_ts(pub_raw)
 
             if link:
@@ -714,6 +941,7 @@ def parse_feed(xml_bytes: bytes, source_url: str) -> Tuple[str, List[Dict[str, A
                     "source": src_title,
                     "text": desc,
                     "image": img,
+                    "images": images,
                 })
 
         return (src_title, items)
@@ -767,6 +995,18 @@ _RE_TG_MSG_ID = re.compile(r"data-post=['\"]([^'\"]+)['\"]", re.S | re.I)
 # document filename
 _RE_TG_DOC_NAME = re.compile(
     r"<div[^>]+class=['\"][^'\"]*\btgme_widget_message_document_name\b[^'\"]*['\"][^>]*>(.*?)</div>",
+    re.S | re.I
+)
+_RE_TG_VOICE_DURATION = re.compile(
+    r"<div[^>]+class=['\"][^'\"]*\btgme_widget_message_(?:voice|audio)_duration\b[^'\"]*['\"][^>]*>(.*?)</div>",
+    re.S | re.I
+)
+_RE_TG_VOICE_TITLE = re.compile(
+    r"<div[^>]+class=['\"][^'\"]*\btgme_widget_message_(?:voice|audio)_title\b[^'\"]*['\"][^>]*>(.*?)</div>",
+    re.S | re.I
+)
+_RE_TG_VOICE_LABEL = re.compile(
+    r"aria-label=['\"]([^'\"]*(?:voice|audio|голос|подкаст)[^'\"]*)['\"]",
     re.S | re.I
 )
 _RE_TG_DATE_HREF = re.compile(
@@ -829,6 +1069,10 @@ _RE_OG_TITLE = re.compile(
     r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)["\']',
     re.S | re.I
 )
+_RE_OG_DESC = re.compile(
+    r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']*)["\']',
+    re.S | re.I
+)
 
 def _extract_tg_channel_title(html: str, username: str) -> str:
     if not html:
@@ -854,6 +1098,18 @@ def _extract_tg_channel_title(html: str, username: str) -> str:
         pass
 
     return f"@{username}"
+
+
+def _extract_tg_og_description(html: str) -> str:
+    if not html:
+        return ""
+    try:
+        m = _RE_OG_DESC.search(html)
+        if m:
+            return _strip_tags_and_format(m.group(1) or "").strip()
+    except Exception:
+        pass
+    return ""
 
 
 def _extract_tg_reply(block_html: str) -> str:
@@ -902,29 +1158,74 @@ def _extract_tg_doc_name(block_html: str) -> str:
         return ""
     return _strip_tags_and_format(m.group(1) or "").strip()
 
-def _best_tg_media_url(block_html: str) -> str:
-    m = _RE_TG_PHOTO_STYLE.search(block_html)
-    if m:
-        u = (m.group(1) or "").strip()
-        if u.startswith("//"):
-            u = "https:" + u
-        return u
+def _extract_tg_voice_label(block_html: str) -> str:
+    if not block_html:
+        return ""
+    has_audio_tag = ("<audio" in block_html.lower())
+    try:
+        if ("voice" not in block_html.lower()) and ("audio" not in block_html.lower()) and ("голос" not in block_html.lower()):
+            return ""
+    except Exception:
+        pass
 
-    m = _RE_TG_VIDEO_STYLE.search(block_html)
-    if m:
-        u = (m.group(1) or "").strip()
-        if u.startswith("//"):
-            u = "https:" + u
-        return u
+    title = ""
+    dur = ""
+    try:
+        m_t = _RE_TG_VOICE_TITLE.search(block_html)
+        if m_t:
+            title = _strip_tags_and_format(m_t.group(1) or "").strip()
+    except Exception:
+        pass
+    try:
+        m_d = _RE_TG_VOICE_DURATION.search(block_html)
+        if m_d:
+            dur = _strip_tags_and_format(m_d.group(1) or "").strip()
+    except Exception:
+        pass
 
-    m = _RE_TG_STICKER_IMG.search(block_html)
-    if m:
-        u = (m.group(1) or "").strip()
-        if u.startswith("//"):
-            u = "https:" + u
-        return u
+    if title and dur:
+        return f"{title} ({dur})"
+    if title:
+        return title
+    if dur:
+        return _tr(f"Голосовое сообщение ({dur})", f"Voice message ({dur})")
+
+    try:
+        m_l = _RE_TG_VOICE_LABEL.search(block_html)
+        if m_l:
+            raw = _strip_tags_and_format(m_l.group(1) or "").strip()
+            if raw:
+                return raw[:120]
+    except Exception:
+        pass
+
+    if has_audio_tag:
+        return _tr("Аудио-сообщение", "Audio message")
 
     return ""
+
+def _all_tg_media_urls(block_html: str) -> List[str]:
+    urls: List[str] = []
+    try:
+        for m in _RE_TG_PHOTO_STYLE.finditer(block_html or ""):
+            urls.append((m.group(1) or "").strip())
+    except Exception:
+        pass
+    try:
+        for m in _RE_TG_VIDEO_STYLE.finditer(block_html or ""):
+            urls.append((m.group(1) or "").strip())
+    except Exception:
+        pass
+    try:
+        for m in _RE_TG_STICKER_IMG.finditer(block_html or ""):
+            urls.append((m.group(1) or "").strip())
+    except Exception:
+        pass
+    return _norm_images_list(urls)
+
+def _best_tg_media_url(block_html: str) -> str:
+    arr = _all_tg_media_urls(block_html)
+    return arr[0] if arr else ""
 
 
 def _extract_tg_text(block_html: str) -> str:
@@ -1000,6 +1301,7 @@ def _parse_tg_preview_page(html: str, username: str, channel_title: str) -> Tupl
                 log(f"[TGDBG2] reply='{reply[:60]}' text_head='{(text.splitlines()[0] if text else '')[:60]}'")
 
             doc_name = _extract_tg_doc_name(b)
+            voice_label = _extract_tg_voice_label(b)
 
             if text:
                 first = text.split("\n", 1)[0].strip()
@@ -1009,10 +1311,13 @@ def _parse_tg_preview_page(html: str, username: str, channel_title: str) -> Tupl
                 title = reply[:120]
             elif doc_name:
                 title = doc_name[:120]
+            elif voice_label:
+                title = voice_label[:120]
             else:
                 title = ""
 
-            img = _best_tg_media_url(b)
+            images = _all_tg_media_urls(b)
+            img = images[0] if images else ""
 
             items.append({
                 "source": src_title,          # что показываем в ленте
@@ -1025,8 +1330,10 @@ def _parse_tg_preview_page(html: str, username: str, channel_title: str) -> Tupl
                 "ts": ts,
                 "text": text,
                 "image": img,
+                "images": images,
                 "reply": reply,
                 "doc": doc_name,
+                "voice": voice_label,
             })
         except Exception as e:
             log(f"[TG] parse block error: {e}")
@@ -1099,7 +1406,32 @@ def _fetch_tg_user_feed(username: str) -> Tuple[str, List[Dict[str, Any]]]:
         html = str(data)
 
     ch_title = _extract_tg_channel_title(html, username)  # ✅ настоящее имя
-    return _parse_tg_preview_page(html, username, ch_title)
+    src_title, items = _parse_tg_preview_page(html, username, ch_title)
+
+    # Для некоторых каналов (в т.ч. NSFW/ограниченных) Telegram не отдаёт посты в web-preview.
+    # Добавляем fallback-карточку, чтобы источник всё равно отображался в ленте.
+    if not items:
+        desc = _extract_tg_og_description(html)
+        if not desc:
+            desc = _tr(f"Посты канала @{username} недоступны в web-preview. Откройте канал в Telegram.", f"Posts from @{username} are unavailable in web preview. Open the channel in Telegram.")
+        items = [{
+            "source": src_title,
+            "source_handle": f"@{username}",
+            "source_title": src_title,
+            "title": src_title,
+            "link": f"https://t.me/{username}",
+            "tg_post_id": f"{username}/channel_preview",
+            "published_raw": "",
+            "ts": 0,
+            "text": desc,
+            "image": "",
+            "images": [],
+            "reply": "",
+            "doc": "",
+            "voice": "",
+        }]
+
+    return (src_title, items)
 
 # ---------------- Plugin ----------------
 class Plugin(BasePlugin):
@@ -1146,6 +1478,10 @@ class Plugin(BasePlugin):
         self._src_back_listener = None
         self._post_back_listener = None
         self._img_back_listener = None
+        self._mini_back_listener = None
+        self._mini_overlay: Optional[FrameLayout] = None
+        self._mini_link: str = ""
+        self._back_tracking_paused = False
 
         self._source_filter: str = ""
         self._category_filter: str = ""
@@ -1153,10 +1489,38 @@ class Plugin(BasePlugin):
         self._nav_feed_btn: Optional[TextView] = None
         self._nav_subs_btn: Optional[TextView] = None
         self._nav_cats_btn: Optional[TextView] = None
+        self._nav_settings_btn: Optional[TextView] = None
+        self._bottom_nav_row: Optional[LinearLayout] = None
+        self._bottom_nav_indicator: Optional[View] = None
+
+        self._gesture_start_x = 0.0
+        self._gesture_start_y = 0.0
+        self._gesture_switched = False
+        self._gesture_dragging = False
+        self._animate_list_once = False
+        self._feed_item_touch_listener = None
+
+        self._ui_scale = _clamp_ui_scale(self.get_setting("ui_scale", "1.00"))
+        self._ui_pad = _clamp_ui_pad(self.get_setting("ui_pad", "16"))
+        self._round_pct = _clamp_round_pct(self.get_setting("round_pct", "100"))
+        self._accent_hex = _norm_hex_color(self.get_setting("accent_hex", "#A259FF"))
+        global _UI_SCALE
+        _UI_SCALE = float(self._ui_scale)
+        self._ui_seek_listener = None
+        self._ui_pad_seek_listener = None
+        self._round_seek_listener = None
+        self._suppress_open_refresh_once = False
 
     # ---- UI rounding ----
     def _corner_radius_px(self) -> int:
-        return _dp(float(CORNER_RADIUS_DP))
+        return _dp(float(CORNER_RADIUS_DP) * (float(self._round_pct) / 100.0))
+
+    def _accent(self, alpha_hex: str = "FF") -> str:
+        base = _norm_hex_color(self._accent_hex, "#A259FF")
+        ah = str(alpha_hex or "FF").strip().upper()
+        if len(ah) != 2:
+            ah = "FF"
+        return "#" + ah + base[1:]
 
     def _bg_rounded(self, fill_hex: str, stroke_hex: str = "#00000000", stroke_dp: float = 0.0):
         bg = GradientDrawable()
@@ -1166,10 +1530,22 @@ class Plugin(BasePlugin):
             bg.setStroke(_dp(stroke_dp), _c(stroke_hex, "#00000000"))
         return bg
 
+    def _bg_important_gradient(self):
+        try:
+            bg = GradientDrawable(
+                GradientDrawable.Orientation.LEFT_RIGHT,
+                [_c("#FF1E1E24"), _c("#6EFFFFFF")]
+            )
+            bg.setCornerRadius(float(self._corner_radius_px()))
+            bg.setStroke(_dp(0), _c("#22FFFFFF"))
+            return bg
+        except Exception:
+            return self._bg_rounded("#FF1E1E24", "#22FFFFFF", 0.0)
+
     def _bg_pill(self, fill_hex: str, stroke_hex: str = "#00000000", stroke_dp: float = 0.0):
         bg = GradientDrawable()
         bg.setColor(_c(fill_hex, "#FF1E1E24"))
-        bg.setCornerRadius(float(_dp(18)))
+        bg.setCornerRadius(float(_dp(18 * (float(self._round_pct) / 100.0))))
         if stroke_dp and stroke_dp > 0:
             bg.setStroke(_dp(stroke_dp), _c(stroke_hex, "#00000000"))
         return bg
@@ -1181,8 +1557,154 @@ class Plugin(BasePlugin):
         except Exception:
             pass
 
+    def _focus_view_safe(self, v: Optional[View]):
+        if v is None:
+            return
+        try:
+            v.setFocusable(True)
+        except Exception:
+            pass
+        try:
+            v.setFocusableInTouchMode(True)
+        except Exception:
+            pass
+        try:
+            v.requestFocus()
+        except Exception:
+            pass
+        try:
+            v.requestFocusFromTouch()
+        except Exception:
+            pass
+
+    def _set_ui_scale(self, value: Any, persist: bool = True):
+        val = _clamp_ui_scale(value)
+        self._ui_scale = val
+        global _UI_SCALE
+        _UI_SCALE = float(val)
+        if persist:
+            try:
+                self.set_setting("ui_scale", f"{val:.2f}")
+            except Exception:
+                pass
+
+    def _set_ui_pad(self, value: Any, persist: bool = True):
+        val = _clamp_ui_pad(value)
+        self._ui_pad = int(val)
+        if persist:
+            try:
+                self.set_setting("ui_pad", str(int(val)))
+            except Exception:
+                pass
+
+    def _set_round_pct(self, value: Any, persist: bool = True):
+        val = _clamp_round_pct(value)
+        self._round_pct = int(val)
+        if persist:
+            try:
+                self.set_setting("round_pct", str(int(val)))
+            except Exception:
+                pass
+
+    def _set_accent_hex(self, value: Any, persist: bool = True):
+        val = _norm_hex_color(value, "#A259FF")
+        self._accent_hex = val
+        if persist:
+            try:
+                self.set_setting("accent_hex", val)
+            except Exception:
+                pass
+
+    def _reload_ui_scale_from_settings(self):
+        """Reload persisted UI scale/padding after plugin runtime/storage is fully initialized."""
+        try:
+            raw = self.get_setting("ui_scale", f"{self._ui_scale:.2f}")
+        except Exception:
+            raw = self._ui_scale
+        self._set_ui_scale(raw, persist=False)
+        try:
+            raw_pad = self.get_setting("ui_pad", str(int(self._ui_pad)))
+        except Exception:
+            raw_pad = self._ui_pad
+        self._set_ui_pad(raw_pad, persist=False)
+        try:
+            raw_round = self.get_setting("round_pct", str(int(self._round_pct)))
+        except Exception:
+            raw_round = self._round_pct
+        self._set_round_pct(raw_round, persist=False)
+        try:
+            raw_accent = self.get_setting("accent_hex", self._accent_hex)
+        except Exception:
+            raw_accent = self._accent_hex
+        self._set_accent_hex(raw_accent, persist=False)
+
+    def _ui_scale_percent(self) -> int:
+        try:
+            return int(round(float(self._ui_scale) * 100.0))
+        except Exception:
+            return 100
+
+    def _ui_scale_to_progress(self, value: float) -> int:
+        return int(round((_clamp_ui_scale(value) - _UI_SCALE_MIN) * 100.0))
+
+    def _progress_to_ui_scale(self, progress: int) -> float:
+        return _clamp_ui_scale(_UI_SCALE_MIN + float(progress) / 100.0)
+
+    def _apply_ui_scale_and_reopen(self, value: float):
+        old = float(self._ui_scale)
+        new = _clamp_ui_scale(value)
+        if abs(new - old) < 0.004:
+            return
+        self._set_ui_scale(new, persist=True)
+        if self._overlay is None:
+            return
+        mode_now = self._mode
+        fragment = get_last_fragment()
+        self._suppress_open_refresh_once = True
+        self._close(animated=False)
+        if fragment:
+            self._open(fragment)
+            if mode_now != "feed":
+                self._set_mode(mode_now)
+
+    def _ui_pad_to_progress(self, value: int) -> int:
+        return int(_clamp_ui_pad(value) - _UI_PAD_MIN)
+
+    def _progress_to_ui_pad(self, progress: int) -> int:
+        return _clamp_ui_pad(_UI_PAD_MIN + int(progress))
+
+    def _apply_ui_pad_and_reopen(self, value: int):
+        old = int(self._ui_pad)
+        new = _clamp_ui_pad(value)
+        if int(new) == int(old):
+            return
+        self._set_ui_pad(new, persist=True)
+        if self._overlay is None:
+            return
+        mode_now = self._mode
+        fragment = get_last_fragment()
+        self._suppress_open_refresh_once = True
+        self._close(animated=False)
+        if fragment:
+            self._open(fragment)
+            if mode_now != "feed":
+                self._set_mode(mode_now)
+
+    def _reopen_overlay(self):
+        if self._overlay is None:
+            return
+        mode_now = self._mode
+        fragment = get_last_fragment()
+        self._suppress_open_refresh_once = True
+        self._close(animated=False)
+        if fragment:
+            self._open(fragment)
+            if mode_now != "feed":
+                self._set_mode(mode_now)
+
     # ---------- lifecycle ----------
     def on_plugin_load(self):
+        self._reload_ui_scale_from_settings()
         self._install_drawer_item()
 
 
@@ -1193,6 +1715,7 @@ class Plugin(BasePlugin):
         run_on_ui_thread(lambda: self._close_source_picker_screen(animated=False))
         run_on_ui_thread(lambda: self._close_post_screen(animated=False))
         run_on_ui_thread(lambda: self._close_image_screen(animated=False))
+        run_on_ui_thread(lambda: self._close_mini_overlay())
 
     # ---------- settings ----------
     def _clear_cache(self):
@@ -1208,15 +1731,15 @@ class Plugin(BasePlugin):
             pass
     def create_settings(self):
         return [
-            Header(text="RSS Моя лента"),
+            Header(text=_tr("RSS Моя лента", "RSS My Feed")),
             Text(
-                text="Открыть ленту",
+                text=_tr("Открыть ленту", "Open feed"),
                 icon="msg_list",
                 accent=True,
                 on_click=lambda v: self._open(get_last_fragment()),
             ),
             Text(
-                text="Очистить кэш",
+                text=_tr("Очистить кэш", "Clear cache"),
                 icon="msg_delete",
                 accent=False,
                 on_click=lambda v: self._clear_cache(),
@@ -1224,7 +1747,7 @@ class Plugin(BasePlugin):
             Divider(),
             Switch(
                 key="auto_refresh",
-                text="Автообновление при открытии",
+                text=_tr("Автообновление при открытии", "Auto-refresh on open"),
                 default=True,
                 icon="msg_autodelete",
             ),
@@ -1235,7 +1758,7 @@ class Plugin(BasePlugin):
         try:
             item = MenuItemData(
                 menu_type=MenuItemType.DRAWER_MENU,
-                text="Моя лента",
+                text=_tr("Моя лента", "My Feed"),
                 on_click=lambda ctx: self._open(ctx.get("fragment") or get_last_fragment()),
                 icon="msg_list",
                 item_id="rss_my_feed_drawer",
@@ -1319,6 +1842,11 @@ class Plugin(BasePlugin):
             # ✅ title теперь может быть пустым (для TG-only-media)
             title = str(it.get("title", "") or "")
             if link:
+                images = _norm_images_list(it.get("images", []))
+                if not images:
+                    one = _upgrade_image_url(it.get("image", ""))
+                    if one:
+                        images = [one]
                 out.append({
                     "source_handle": str(it.get("source_handle", "") or ""),
                     "source_title": str(it.get("source_title", "") or ""),
@@ -1330,9 +1858,11 @@ class Plugin(BasePlugin):
                     "sort_ts": int(it.get("sort_ts", 0) or 0),
                     "source": str(it.get("source", "") or ""),
                     "text": str(it.get("text", "") or ""),
-                    "image": str(it.get("image", "") or ""),
+                    "image": (images[0] if images else ""),
+                    "images": images,
                     "reply": str(it.get("reply", "") or ""),
                     "doc": str(it.get("doc", "") or ""),
+                    "voice": str(it.get("voice", "") or ""),
                     "tg_post_id": str(it.get("tg_post_id", "") or ""),
                     "category": _norm_category(it.get("category", "")),
                 })
@@ -1348,32 +1878,123 @@ class Plugin(BasePlugin):
     # ---------- refresh ----------
     def _bind_back_handler(self, overlay: View, close_cb, store_attr: str):
         try:
-            overlay.setFocusable(True)
-            try:
-                overlay.setFocusableInTouchMode(True)
-            except Exception:
-                pass
+            self._focus_view_safe(overlay)
 
             def on_key(_v, key_code, event):
                 try:
+                    if bool(getattr(self, "_back_tracking_paused", False)):
+                        return False
                     if int(key_code) != int(KeyEvent.KEYCODE_BACK):
                         return False
                     act = int(event.getAction())
-                    if act == int(KeyEvent.ACTION_UP):
+                    # ACTION_DOWN catches both button back and gesture back reliably.
+                    if act == int(KeyEvent.ACTION_DOWN):
                         close_cb()
-                    return True
+                        return True
+                    if act == int(KeyEvent.ACTION_UP):
+                        return True
+                    return False
                 except Exception:
                     return False
 
-            listener = _OnKeyListener(on_key)
-            overlay.setOnKeyListener(listener)
+            listener = None
             try:
-                overlay.requestFocus()
+                listener = _OnKeyListener(on_key)
+            except Exception:
+                listener = None
+
+            if listener is None:
+                class _LocalOnKeyListener(dynamic_proxy(View.OnKeyListener)):
+                    def __init__(self, fn):
+                        super().__init__()
+                        self._fn = fn
+                    def onKey(self, v, key_code, event):
+                        return bool(self._fn(v, key_code, event))
+                listener = _LocalOnKeyListener(on_key)
+
+            def attach_to_tree(v: View):
+                try:
+                    v.setOnKeyListener(listener)
+                except Exception:
+                    pass
+                if isinstance(v, ViewGroup):
+                    try:
+                        cnt = int(v.getChildCount() or 0)
+                    except Exception:
+                        cnt = 0
+                    for i in range(cnt):
+                        try:
+                            ch = v.getChildAt(i)
+                        except Exception:
+                            ch = None
+                        if ch is not None:
+                            attach_to_tree(ch)
+
+            attach_to_tree(overlay)
+            self._focus_view_safe(overlay)
+
+            def late_bind():
+                try:
+                    attach_to_tree(overlay)
+                    self._focus_view_safe(overlay)
+                except Exception:
+                    pass
+
+            def focus_guard():
+                try:
+                    parent = overlay.getParent()
+                    if parent is None:
+                        return
+                except Exception:
+                    return
+                try:
+                    attach_to_tree(overlay)
+                    self._focus_view_safe(overlay)
+                except Exception:
+                    pass
+                try:
+                    AndroidUtilities.runOnUIThread(Runnable(focus_guard), 420)
+                except Exception:
+                    pass
+            try:
+                AndroidUtilities.runOnUIThread(Runnable(late_bind), 80)
+                AndroidUtilities.runOnUIThread(Runnable(late_bind), 220)
+                AndroidUtilities.runOnUIThread(Runnable(focus_guard), 420)
             except Exception:
                 pass
             setattr(self, store_attr, listener)
         except Exception as e:
             log(f"[RSS] back handler bind error: {e}")
+
+    def _handle_back_action(self) -> bool:
+        """Back should step through plugin states and never close Telegram directly."""
+        try:
+            if self._mini_overlay is not None:
+                self._restore_from_mini()
+                return True
+            if self._img_overlay is not None:
+                self._close_image_screen(animated=True)
+                return True
+            if self._post_overlay is not None:
+                self._close_post_screen(animated=True)
+                return True
+            if self._src_overlay is not None:
+                self._close_source_picker_screen(animated=True)
+                return True
+            if self._cat_overlay is not None:
+                self._close_category_screen(animated=True)
+                return True
+            if self._add_overlay is not None:
+                self._close_add_feed_screen(animated=True)
+                return True
+            if self._overlay is not None:
+                # В ленте/категориях/подписках/настройках закрываем только интерфейс плагина.
+                self._close(animated=True)
+                return True
+        except Exception as e:
+            log(f"[RSS] back action error: {e}")
+            return False
+        return False
 
     def _set_refreshing_ui(self, val: bool):
         self._refreshing = bool(val)
@@ -1385,27 +2006,30 @@ class Plugin(BasePlugin):
 
     def _source_filter_label(self) -> str:
         if not self._source_filter:
-            return "Выбрать источник ▾"
+            return _tr("Выбрать источник ▾", "Select source ▾")
         name = self._source_filter
         if len(name) > 22:
             name = name[:21].rstrip() + "…"
-        return f"Источник: {name} ▾"
+        return (_tr("Источник", "Source") + f": {name} ▾")
 
     def _category_filter_label(self) -> str:
         if not self._category_filter:
-            return "Выбрать категорию ▾"
+            return _tr("Выбрать категорию ▾", "Select category ▾")
         name = self._category_filter
         if len(name) > 22:
             name = name[:21].rstrip() + "…"
-        return f"Категория: {name} ▾"
+        return (_tr("Категория", "Category") + f": {name} ▾")
 
     def _top_filter_label(self) -> str:
+        if self._mode == "settings":
+            return _tr("Настройки", "Settings")
         return self._category_filter_label() if self._mode == "cats" else self._source_filter_label()
 
     def _update_source_button(self):
         try:
             if self._source_btn is not None:
                 self._source_btn.setText(self._top_filter_label())
+                self._source_btn.setAlpha(0.58 if self._mode == "settings" else 1.0)
         except Exception:
             pass
 
@@ -1442,6 +2066,7 @@ class Plugin(BasePlugin):
         opts = self._source_filter_options()
         self._source_filter = val if val in opts else ""
         self._update_source_button()
+        self._animate_list_once = True
         self._render()
 
     def _set_category_filter(self, category_value: str):
@@ -1449,9 +2074,12 @@ class Plugin(BasePlugin):
         opts = self._category_filter_options()
         self._category_filter = val if val in opts else ""
         self._update_source_button()
+        self._animate_list_once = True
         self._render()
 
     def _open_top_filter_picker(self):
+        if self._mode == "settings":
+            return
         if self._mode == "cats":
             self._open_category_picker_screen()
         else:
@@ -1483,7 +2111,7 @@ class Plugin(BasePlugin):
         card = LinearLayout(activity)
         card.setOrientation(LinearLayout.VERTICAL)
         card.setPadding(_dp(12), _dp(12), _dp(12), _dp(12))
-        card.setBackground(self._bg_rounded("#FF171A24", "#22FFFFFF", 1.0))
+        card.setBackground(self._bg_rounded("#FF171A24", "#22FFFFFF", 0.0))
         card.setClickable(True)
         lp_card = FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1496,7 +2124,7 @@ class Plugin(BasePlugin):
 
         title_tv = TextView(activity)
         title_tv.setText(picker_title)
-        title_tv.setTextSize(17)
+        title_tv.setTextSize(27)
         title_tv.setTextColor(_c("#FFFFFFFF"))
         title_tv.setPadding(_dp(2), _dp(2), _dp(2), _dp(10))
         card.addView(title_tv)
@@ -1533,7 +2161,7 @@ class Plugin(BasePlugin):
             lp_btn.bottomMargin = _dp(8)
             col.addView(btn, lp_btn)
 
-        close_btn = self._top_button(activity, "Закрыть", lambda: self._close_source_picker_screen(animated=True))
+        close_btn = self._top_button(activity, " Свернуть ", lambda: self._close_source_picker_screen(animated=True))
         lp_close = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT,
             ViewGroup.LayoutParams.WRAP_CONTENT
@@ -1544,7 +2172,7 @@ class Plugin(BasePlugin):
         self._src_overlay = overlay
         self._src_content = card
         decor.addView(overlay)
-        self._bind_back_handler(overlay, lambda: self._close_source_picker_screen(animated=True), "_src_back_listener")
+        self._bind_back_handler(overlay, lambda: self._handle_back_action(), "_src_back_listener")
 
         try:
             overlay.setAlpha(0.0)
@@ -1561,15 +2189,15 @@ class Plugin(BasePlugin):
 
     def _open_source_picker_screen(self):
         vals = self._source_filter_options()
-        options = [("", "Все источники")] + [(x, x) for x in vals if x]
+        options = [("", _tr("Все источники", "All sources"))] + [(x, x) for x in vals if x]
         cur = self._source_filter if self._source_filter in vals else ""
-        self._open_picker_screen("Выбор источника", options, cur, self._set_source_filter)
+        self._open_picker_screen(_tr("Выбор источника", "Select source"), options, cur, self._set_source_filter)
 
     def _open_category_picker_screen(self):
         vals = self._category_filter_options()
-        options = [("", "Все категории")] + [(x, x) for x in vals if x]
+        options = [("", _tr("Все категории", "All categories"))] + [(x, x) for x in vals if x]
         cur = self._category_filter if self._category_filter in vals else ""
-        self._open_picker_screen("Выбор категории", options, cur, self._set_category_filter)
+        self._open_picker_screen(_tr("Выбор категории", "Select category"), options, cur, self._set_category_filter)
 
     def _close_source_picker_screen(self, animated: bool):
         overlay = self._src_overlay
@@ -1642,7 +2270,14 @@ class Plugin(BasePlugin):
                     it["source_title"]  = str(it.get("source_title", "") or it.get("source", "") or "")
                     it["reply"] = str(it.get("reply", "") or "")
                     it["doc"] = str(it.get("doc", "") or "")
+                    it["voice"] = str(it.get("voice", "") or "")
                     it["tg_post_id"] = str(it.get("tg_post_id", "") or "")
+                    imgs = _norm_images_list(it.get("images", []))
+                    one_img = _upgrade_image_url(it.get("image", ""))
+                    if one_img and one_img not in imgs:
+                        imgs.insert(0, one_img)
+                    it["images"] = imgs
+                    it["image"] = imgs[0] if imgs else one_img
                     prev = old_by_key.get(key) if key else None
                     prev_cat = _norm_category((prev or {}).get("category") or "")
                     it["category"] = sub_cat if sub_cat else prev_cat
@@ -1691,17 +2326,23 @@ class Plugin(BasePlugin):
         row = LinearLayout(ctx)
         row.setOrientation(LinearLayout.HORIZONTAL)
         row.setPadding(_dp(10), _dp(8), _dp(10), _dp(8))
-        row.setBackground(self._bg_rounded("#141AFFFFFF"))
+        # Reply bubble is intentionally darker than the card itself.
+        row.setBackground(self._bg_rounded("#32000000", "#28FFFFFF", 0.0))
 
         bar = View(ctx)
-        bar.setBackgroundColor(_c("#FFFFF0FF"))
-        row.addView(bar, LinearLayout.LayoutParams(_dp(3), ViewGroup.LayoutParams.MATCH_PARENT))
 
+        gd = GradientDrawable()
+        gd.setColor(_c(self._accent("FF")))
+        gd.setCornerRadii([_dp(99),_dp(99), 0,0, 0,0, _dp(99),_dp(99)])  # TL,TR, BR,BL (парами)
+        bar.setBackground(gd)
+
+        lp_bar = LinearLayout.LayoutParams(_dp(3.5), ViewGroup.LayoutParams.MATCH_PARENT)
+        row.addView(bar, lp_bar)
         tv = TextView(ctx)
         tv.setText(reply_text)
         tv.setTextSize(13)
         tv.setTextColor(_c("#FFFFFFFF"))
-        tv.setAlpha(0.55)
+        tv.setAlpha(0.64)
         tv.setSingleLine(False)
 
         lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0)
@@ -1713,8 +2354,9 @@ class Plugin(BasePlugin):
     def _top_button(self, ctx, text: str, cb):
         b = TextView(ctx)
         b.setText(text)
-        b.setTextSize(14)
+        b.setTextSize(11)
         b.setTextColor(_c("#FFFFFFFF"))
+        b.setTypeface(None, Typeface.BOLD)
         b.setPadding(_dp(12), _dp(8), _dp(12), _dp(8))
         b.setClickable(True)
         b.setBackground(self._bg_rounded("#1AFFFFFF"))
@@ -1726,6 +2368,10 @@ class Plugin(BasePlugin):
                 pass
             try:
                 cb()
+                try:
+                    self._update_bottom_nav_indicator(animated=True)
+                except Exception:
+                    pass
             except Exception as e:
                 log(f"[RSS] top button error: {e}")
 
@@ -1735,9 +2381,10 @@ class Plugin(BasePlugin):
     def _primary_button(self, ctx, text: str, cb):
         b = TextView(ctx)
         b.setText(text)
-        b.setTextSize(15)
+        b.setTextSize(11)
         b.setGravity(Gravity.CENTER)
         b.setTextColor(_c("#FFFFFFFF"))
+        b.setTypeface(None, Typeface.BOLD)
         b.setPadding(_dp(12), _dp(12), _dp(12), _dp(12))
         b.setClickable(True)
         b.setBackground(self._bg_rounded("#22FFFFFF"))
@@ -1749,6 +2396,10 @@ class Plugin(BasePlugin):
                 pass
             try:
                 cb()
+                try:
+                    self._update_bottom_nav_indicator(animated=True)
+                except Exception:
+                    pass
             except Exception as e:
                 log(f"[RSS] primary button error: {e}")
 
@@ -1763,7 +2414,7 @@ class Plugin(BasePlugin):
     def _bottom_nav_button(self, ctx, text: str, cb):
         b = TextView(ctx)
         b.setText(text)
-        b.setTextSize(15)
+        b.setTextSize(11)
         b.setGravity(Gravity.CENTER)
         b.setTextColor(_c("#FFFFFFFF"))
         b.setPadding(_dp(10), _dp(10), _dp(10), _dp(10))
@@ -1777,66 +2428,231 @@ class Plugin(BasePlugin):
                 pass
             try:
                 v.animate().cancel()
-                v.animate().scaleX(0.96).scaleY(0.96).setDuration(70).start()
-                AndroidUtilities.runOnUIThread(
-                    Runnable(lambda: v.animate().scaleX(1.0).scaleY(1.0).setDuration(120).start()),
-                    75
-                )
+                a = v.animate().scaleX(0.96).scaleY(0.96).setDuration(70)
+                try:
+                    a.withEndAction(Runnable(lambda: v.animate().scaleX(1.0).scaleY(1.0).setDuration(120).start()))
+                except Exception:
+                    pass
+                a.start()
             except Exception:
-                pass
+                try:
+                    v.setScaleX(1.0)
+                    v.setScaleY(1.0)
+                except Exception:
+                    pass
             try:
                 cb()
+                try:
+                    self._update_bottom_nav_indicator(animated=True)
+                except Exception:
+                    pass
             except Exception as e:
                 log(f"[RSS] bottom nav button error: {e}")
 
         b.setOnClickListener(OnClickListener(on_click))
         return b
 
+    def _mode_order(self) -> List[str]:
+        return ["feed", "cats", "subs", "settings"]
+
+    def _mode_index(self, mode: str) -> int:
+        order = self._mode_order()
+        try:
+            return order.index(mode)
+        except Exception:
+            return 0
+
+    def _switch_mode_by_swipe(self, dx: float):
+        order = self._mode_order()
+        cur = self._mode_index(self._mode)
+        step = 1 if float(dx) < 0 else -1
+        nxt = max(0, min(len(order) - 1, cur + step))
+        if nxt == cur:
+            return
+        try:
+            if self._main_scroll is not None:
+                self._main_scroll.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+        except Exception:
+            pass
+        self._set_mode(order[nxt])
+
+    def _preview_page_swipe(self, dx: float):
+        try:
+            cont = self._list_container
+            if cont is not None:
+                shift = max(-float(_dp(90)), min(float(_dp(90)), float(dx) * 0.55))
+                cont.setTranslationX(shift)
+        except Exception:
+            pass
+        try:
+            row = self._bottom_nav_row
+            ind = self._bottom_nav_indicator
+            if row is None or ind is None:
+                return
+            w = int(row.getWidth() or 0)
+            total = len(self._mode_order())
+            if w <= 0 or total <= 0:
+                return
+            seg = float(w) / float(total)
+            base = float(self._mode_index(self._mode)) * seg
+            target = max(0.0, min(seg * float(total - 1), base + float(-dx) * 0.35))
+            ind.setTranslationX(target)
+        except Exception:
+            pass
+
+    def _finish_page_swipe_preview(self):
+        try:
+            if self._list_container is not None:
+                self._list_container.animate().translationX(0.0).setDuration(140).start()
+        except Exception:
+            pass
+        try:
+            self._update_bottom_nav_indicator(animated=True)
+        except Exception:
+            pass
+
+    def _update_bottom_nav_indicator(self, animated: bool):
+        row = self._bottom_nav_row
+        ind = self._bottom_nav_indicator
+        if row is None or ind is None:
+            return
+        idx = self._mode_index(self._mode)
+        total = len(self._mode_order())
+
+        def apply():
+            try:
+                w = int(row.getWidth() or 0)
+                if w <= 0 or total <= 0:
+                    return
+                seg = max(1, int(w / total))
+                lp = ind.getLayoutParams()
+                if lp is not None:
+                    try:
+                        if int(lp.width or 0) != seg:
+                            lp.width = seg
+                            ind.setLayoutParams(lp)
+                    except Exception:
+                        pass
+                tx = float(seg * idx)
+                if animated:
+                    ind.animate().translationX(tx).setDuration(170).start()
+                else:
+                    ind.setTranslationX(tx)
+            except Exception:
+                pass
+
+        try:
+            row.post(Runnable(apply))
+        except Exception:
+            try:
+                AndroidUtilities.runOnUIThread(Runnable(apply), 0)
+            except Exception:
+                pass
+
+    def _handle_item_swipe_touch(self, ev) -> bool:
+        try:
+            try:
+                act = int(ev.getActionMasked())
+            except Exception:
+                act = int(ev.getAction())
+
+            if act == MotionEvent.ACTION_DOWN:
+                self._gesture_start_x = float(ev.getX())
+                self._gesture_start_y = float(ev.getY())
+                self._gesture_switched = False
+                self._focus_view_safe(self._overlay)
+                return False
+
+            if act == MotionEvent.ACTION_MOVE:
+                dx = float(ev.getX()) - float(self._gesture_start_x)
+                dy = float(ev.getY()) - float(self._gesture_start_y)
+                if (not self._gesture_switched) and (abs(dx) > float(_dp(72))) and (abs(dx) > abs(dy) * 1.2):
+                    self._gesture_switched = True
+                    self._switch_mode_by_swipe(dx)
+                    return True
+                return bool(self._gesture_switched)
+
+            if act in (MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL):
+                consumed = bool(self._gesture_switched)
+                self._gesture_switched = False
+                return consumed
+        except Exception:
+            return False
+        return False
+
     def _update_bottom_nav_state(self):
         try:
-            if self._nav_feed_btn is None or self._nav_subs_btn is None or self._nav_cats_btn is None:
+            if self._nav_feed_btn is None or self._nav_subs_btn is None or self._nav_cats_btn is None or self._nav_settings_btn is None:
                 return
             is_feed = (self._mode == "feed")
             is_subs = (self._mode == "subs")
             is_cats = (self._mode == "cats")
+            is_settings = (self._mode == "settings")
 
-            self._nav_feed_btn.setBackground(self._bg_pill("#2AFFFFFF" if is_feed else "#00000000"))
-            self._nav_subs_btn.setBackground(self._bg_pill("#2AFFFFFF" if is_subs else "#00000000"))
-            self._nav_cats_btn.setBackground(self._bg_pill("#2AFFFFFF" if is_cats else "#00000000"))
+            self._nav_feed_btn.setBackground(self._bg_pill("#00000000"))
+            self._nav_subs_btn.setBackground(self._bg_pill("#00000000"))
+            self._nav_cats_btn.setBackground(self._bg_pill("#00000000"))
+            self._nav_settings_btn.setBackground(self._bg_pill("#00000000"))
 
             self._nav_feed_btn.setAlpha(1.0 if is_feed else 0.78)
             self._nav_subs_btn.setAlpha(1.0 if is_subs else 0.78)
             self._nav_cats_btn.setAlpha(1.0 if is_cats else 0.78)
+            self._nav_settings_btn.setAlpha(1.0 if is_settings else 0.78)
+            self._nav_feed_btn.setBackground(self._bg_pill(self._accent("33") if is_feed else "#00000000"))
+            self._nav_subs_btn.setBackground(self._bg_pill(self._accent("33") if is_subs else "#00000000"))
+            self._nav_cats_btn.setBackground(self._bg_pill(self._accent("33") if is_cats else "#00000000"))
+            self._nav_settings_btn.setBackground(self._bg_pill(self._accent("33") if is_settings else "#00000000"))
+        except Exception:
+            pass
+
+
+    def _active_nav_button(self):
+        if self._mode == "feed":
+            return self._nav_feed_btn
+        if self._mode == "cats":
+            return self._nav_cats_btn
+        if self._mode == "subs":
+            return self._nav_subs_btn
+        return self._nav_settings_btn
+
+    def _pulse_active_nav(self):
+        try:
+            b = self._active_nav_button()
+            if b is None:
+                return
+            b.animate().cancel()
+            b.setScaleX(0.94)
+            b.setScaleY(0.94)
+            b.animate().scaleX(1.0).scaleY(1.0).setDuration(170).start()
         except Exception:
             pass
 
     def _animate_entry(self, v: View, idx: int = 0):
         try:
             delay = int(min(max(idx, 0), 10) * 22)
-            v.setAlpha(0.0)
-            v.setTranslationY(float(_dp(10)))
-
-            def run():
-                try:
-                    anim = v.animate().alpha(1.0).translationY(0.0).setDuration(180)
-                    try:
-                        anim.setInterpolator(DecelerateInterpolator())
-                    except Exception:
-                        pass
-                    anim.start()
-                except Exception:
-                    pass
-
-            if delay > 0:
-                AndroidUtilities.runOnUIThread(Runnable(run), delay)
-            else:
-                run()
+            v.setAlpha(1.0)
+            v.setTranslationY(float(_dp(6)))
+            anim = v.animate().translationY(0.0).setDuration(160)
+            try:
+                anim.setStartDelay(delay)
+            except Exception:
+                pass
+            try:
+                anim.setInterpolator(DecelerateInterpolator())
+            except Exception:
+                pass
+            anim.start()
         except Exception:
-            pass
+            try:
+                v.setAlpha(1.0)
+                v.setTranslationY(0.0)
+            except Exception:
+                pass
 
     # ---------- MAIN SCREEN ----------
     def _open(self, fragment):
         log("[RSS] _open: start")
+        self._reload_ui_scale_from_settings()
         if self._overlay is not None:
             log("[RSS] _open: already opened")
             return
@@ -1871,7 +2687,7 @@ class Plugin(BasePlugin):
         except Exception as e:
             log(f"[RSS] _open: decor.addView failed: {e}")
             return
-        self._bind_back_handler(overlay, lambda: self._close(animated=True), "_main_back_listener")
+        self._bind_back_handler(overlay, lambda: self._handle_back_action(), "_main_back_listener")
 
         content = LinearLayout(activity)
         content.setOrientation(LinearLayout.VERTICAL)
@@ -1879,7 +2695,7 @@ class Plugin(BasePlugin):
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT
         ))
-        content.setPadding(_dp(16), _statusbar_pad() + _dp(10), _dp(16), _dp(14))
+        content.setPadding(_dp(16), _statusbar_pad() + _dp(10), _dp(16), 0)
         overlay.addView(content)
 
         top = LinearLayout(activity)
@@ -1888,7 +2704,7 @@ class Plugin(BasePlugin):
         content.addView(top)
 
         title = TextView(activity)
-        title.setText("Моя лента")
+        title.setText(_tr("Моя лента", "My Feed"))
         title.setTextSize(20)
         title.setTextColor(_c("#FFFFFFFF"))
         top.addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
@@ -1897,13 +2713,13 @@ class Plugin(BasePlugin):
         self._source_btn = source_btn
         top.addView(source_btn)
         top.addView(self._spacer_h(activity, 8))
-        top.addView(self._top_button(activity, "Закрыть", lambda: self._close(animated=True)))
+        top.addView(self._top_button(activity, " X ", lambda: self._close(animated=True)))
 
         hint = TextView(activity)
         hint.setText("ExteraRSS By @RoflPlugins")
         hint.setTextSize(12)
         hint.setTextColor(_c("#FFFFFFFF"))
-        hint.setAlpha(0.65)
+        hint.setAlpha(0.45)
         hint.setPadding(0, _dp(6), 0, _dp(10))
         content.addView(hint)
 
@@ -1923,8 +2739,9 @@ class Plugin(BasePlugin):
         refresh_bar.addView(pb, LinearLayout.LayoutParams(_dp(18), _dp(18)))
 
         txt = TextView(activity)
-        txt.setText("Обновление… ")
+        txt.setText(_tr("Обновление… ", "Refreshing… "))
         txt.setTextSize(13)
+        txt.setTypeface(None, Typeface.BOLD)
         txt.setTextColor(_c("#FFFFFFFF"))
         txt.setAlpha(0.85)
         lp_txt = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
@@ -1966,36 +2783,49 @@ class Plugin(BasePlugin):
         bottom_nav.setOrientation(LinearLayout.HORIZONTAL)
         bottom_nav.setGravity(Gravity.CENTER_VERTICAL)
         bottom_nav.setPadding(_dp(4), _dp(4), _dp(4), _dp(4))
-        bottom_nav.setBackground(self._bg_pill("#1C1AFFFFFF", "#24FFFFFF", 1.0))
+        bottom_nav.setBackground(self._bg_pill("#1C1AFFFFFF", "#24FFFFFF", 0.0))
         lp_nav = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         lp_nav.topMargin = _dp(10)
+        lp_nav.bottomMargin = _dp(self._ui_pad)
         content.addView(bottom_nav, lp_nav)
 
-        nav_feed = self._bottom_nav_button(activity, "Лента", lambda: self._set_mode("feed"))
-        nav_cats = self._bottom_nav_button(activity, "Категории", lambda: self._set_mode("cats"))
-        nav_subs = self._bottom_nav_button(activity, "Подписки", lambda: self._set_mode("subs"))
+        nav_feed = self._bottom_nav_button(activity, _tr("Лента", "Feed"), lambda: self._set_mode("feed"))
+        nav_cats = self._bottom_nav_button(activity, _tr("Категории", "Categories"), lambda: self._set_mode("cats"))
+        nav_subs = self._bottom_nav_button(activity, _tr("Подписки", "Subscriptions"), lambda: self._set_mode("subs"))
+        nav_settings = self._bottom_nav_button(activity, _tr("Настройки", "Settings"), lambda: self._set_mode("settings"))
         self._nav_feed_btn = nav_feed
         self._nav_cats_btn = nav_cats
         self._nav_subs_btn = nav_subs
+        self._nav_settings_btn = nav_settings
 
         lp_feed = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0)
         lp_cats = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0)
         lp_cats.leftMargin = _dp(6)
         lp_subs = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0)
         lp_subs.leftMargin = _dp(6)
+        lp_settings = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0)
+        lp_settings.leftMargin = _dp(6)
 
         bottom_nav.addView(nav_feed, lp_feed)
         bottom_nav.addView(nav_cats, lp_cats)
         bottom_nav.addView(nav_subs, lp_subs)
+        bottom_nav.addView(nav_settings, lp_settings)
+        self._bottom_nav_row = bottom_nav
         try:
-            bottom_nav.setAlpha(0.0)
+            bottom_nav.setAlpha(1.0)
             bottom_nav.setTranslationY(float(_dp(14)))
-            AndroidUtilities.runOnUIThread(
-                Runnable(lambda: bottom_nav.animate().alpha(1.0).translationY(0.0).setDuration(220).start()),
-                80
-            )
+            nav_anim = bottom_nav.animate().translationY(0.0).setDuration(180)
+            try:
+                nav_anim.setStartDelay(80)
+            except Exception:
+                pass
+            nav_anim.start()
         except Exception:
-            pass
+            try:
+                bottom_nav.setAlpha(1.0)
+                bottom_nav.setTranslationY(0.0)
+            except Exception:
+                pass
 
         self._main_scroll = sv
         self._overlay = overlay
@@ -2003,6 +2833,7 @@ class Plugin(BasePlugin):
         self._list_container = list_container
         self._mode = "feed"
         self._update_bottom_nav_state()
+        self._pulse_active_nav()
 
         # --- pull-to-refresh без androidx ---
         def start_refresh_from_pull():
@@ -2014,37 +2845,57 @@ class Plugin(BasePlugin):
 
         def on_touch(_v, ev):
             try:
-                if self._mode != "feed":
-                    return False
-
-                # не триггерим во время обновления
-                if self._refreshing:
-                    return False
-
-                # важно: тянем только когда ScrollView уже в самом верху
-                try:
-                    at_top = (not bool(sv.canScrollVertically(-1)))
-                except Exception:
-                    at_top = (sv.getScrollY() <= 0)
-
                 try:
                     act = int(ev.getActionMasked())
                 except Exception:
                     act = int(ev.getAction())
 
                 if act == MotionEvent.ACTION_DOWN:
+                    self._gesture_start_x = float(ev.getX())
+                    self._gesture_start_y = float(ev.getY())
+                    self._gesture_switched = False
+                    self._focus_view_safe(self._overlay)
                     self._pull_start_y = float(ev.getY())
-                    self._pull_armed = at_top
+                    try:
+                        at_top = (not bool(sv.canScrollVertically(-1)))
+                    except Exception:
+                        at_top = (sv.getScrollY() <= 0)
+                    self._pull_armed = (self._mode in ("feed", "cats") and (not self._refreshing) and at_top)
                     return False
 
                 if act == MotionEvent.ACTION_MOVE:
+                    dx = float(ev.getX()) - float(self._gesture_start_x)
+                    dy_total = float(ev.getY()) - float(self._gesture_start_y)
+
+                    # свайп влево/вправо по ленте -> переключение нижних вкладок
+                    if (not self._gesture_switched) and (abs(dx) > float(_dp(72))) and (abs(dx) > abs(dy_total) * 1.2):
+                        self._gesture_switched = True
+                        self._pull_armed = False
+                        self._switch_mode_by_swipe(dx)
+                        return True
+
+                    if self._mode not in ("feed", "cats"):
+                        return False
+
+                    # не триггерим pull-to-refresh во время обновления
+                    if self._refreshing:
+                        return False
+
                     if not self._pull_armed:
                         return False
+
+                    # важно: pull только в самом верху
+                    try:
+                        at_top = (not bool(sv.canScrollVertically(-1)))
+                    except Exception:
+                        at_top = (sv.getScrollY() <= 0)
                     if not at_top:
                         self._pull_armed = False
                         return False
 
                     dy = float(ev.getY()) - float(self._pull_start_y)
+                    if abs(dx) > abs(dy):
+                        return False
 
                     # порог "как в браузере": потянул заметно вниз
                     if dy > float(_dp(64)):
@@ -2061,6 +2912,7 @@ class Plugin(BasePlugin):
 
                 if act in (MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL):
                     self._pull_armed = False
+                    self._gesture_switched = False
                     return False
 
             except Exception:
@@ -2078,6 +2930,7 @@ class Plugin(BasePlugin):
             log(f"[RSS] pull-to-refresh disabled: {e}")
 
         self._render()
+        self._focus_view_safe(overlay)
 
         
 
@@ -2095,10 +2948,11 @@ class Plugin(BasePlugin):
             pass
 
 
-        if self.get_setting("auto_refresh", True):
+        if self._suppress_open_refresh_once:
+            self._suppress_open_refresh_once = False
+        elif self.get_setting("auto_refresh", True):
             self._set_refreshing_ui(True)
             self._refresh_async()
-        self._render()
 
     def _close(self, animated: bool):
         overlay = self._overlay
@@ -2123,6 +2977,13 @@ class Plugin(BasePlugin):
             self._nav_feed_btn = None
             self._nav_cats_btn = None
             self._nav_subs_btn = None
+            self._nav_settings_btn = None
+            self._gesture_switched = False
+            self._gesture_dragging = False
+            self._bottom_nav_row = None
+            self._bottom_nav_indicator = None
+            self._feed_item_touch_listener = None
+            self._ui_seek_listener = None
 
         if not animated or content is None:
             detach()
@@ -2140,9 +3001,17 @@ class Plugin(BasePlugin):
 
     def _set_mode(self, mode: str):
         if mode == self._mode:
+            try:
+                self._update_bottom_nav_indicator(animated=True)
+                self._pulse_active_nav()
+            except Exception:
+                pass
             return
         self._close_source_picker_screen(animated=False)
+        prev_idx = self._mode_index(self._mode)
         self._mode = mode
+        new_idx = self._mode_index(mode)
+        self._animate_list_once = True
         self._update_source_button()
         self._update_bottom_nav_state()
         container = self._list_container
@@ -2155,10 +3024,13 @@ class Plugin(BasePlugin):
             pass
         self._render()
         self._update_bottom_nav_state()
+        self._pulse_active_nav()
         try:
-            container.setAlpha(0.0)
-            container.setTranslationY(float(_dp(8)))
-            anim_in = container.animate().alpha(1.0).translationY(0.0).setDuration(170)
+            container.setAlpha(1.0)
+            direction = 1 if new_idx > prev_idx else -1
+            container.setTranslationX(float(direction * _dp(22)))
+            container.setTranslationY(0.0)
+            anim_in = container.animate().translationX(0.0).setDuration(190)
             try:
                 anim_in.setInterpolator(DecelerateInterpolator())
             except Exception:
@@ -2209,6 +3081,7 @@ class Plugin(BasePlugin):
         back = TextView(activity)
         back.setText("←")
         back.setTextSize(20)
+        back.setTypeface(None, Typeface.BOLD)
         back.setTextColor(_c("#FFFFFFFF"))
         back.setPadding(_dp(6), _dp(6), _dp(12), _dp(6))
         back.setClickable(True)
@@ -2216,8 +3089,9 @@ class Plugin(BasePlugin):
         top.addView(back)
 
         title = TextView(activity)
-        title.setText("Добавить RSS-ленту")
+        title.setText(_tr("Добавить RSS-ленту", "Add RSS feed"))
         title.setTextSize(20)
+        title.setTypeface(None, Typeface.BOLD)
         title.setTextColor(_c("#FFFFFFFF"))
         top.addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
 
@@ -2226,21 +3100,21 @@ class Plugin(BasePlugin):
         content.addView(sp)
 
         h = TextView(activity)
-        h.setText("Добавить RSS-ленту")
+        h.setText(_tr("Добавить RSS-ленту", "Add RSS feed"))
         h.setTextSize(24)
         h.setTextColor(_c("#FFFFFFFF"))
         h.setPadding(0, 0, 0, _dp(18))
         content.addView(h)
 
         lbl = TextView(activity)
-        lbl.setText("Адрес RSS (или @username для Telegram)")
+        lbl.setText(_tr("Адрес RSS (или username/@username/ссылка Telegram)", "RSS URL (or Telegram username/@username/link)"))
         lbl.setTextSize(13)
         lbl.setTextColor(_c("#FFFFFFFF"))
         lbl.setAlpha(0.85)
         content.addView(lbl)
 
         url_input = EditText(activity)
-        url_input.setHint("https://site.com/rss  или  @channel")
+        url_input.setHint(_tr("https://site.com/rss  или  @channel / channel / t.me/channel", "https://site.com/rss  or  @channel / channel / t.me/channel"))
         url_input.setSingleLine(True)
         url_input.setPadding(_dp(12), _dp(12), _dp(12), _dp(12))
         url_input.setTextColor(_c("#FFFFFFFF"))
@@ -2254,7 +3128,7 @@ class Plugin(BasePlugin):
         content.addView(url_input, lp)
 
         lbl_cat = TextView(activity)
-        lbl_cat.setText("Категория (любая, необязательно)")
+        lbl_cat.setText(_tr("Категория (любая, необязательно)", "Category (optional)"))
         lbl_cat.setTextSize(13)
         lbl_cat.setTextColor(_c("#FFFFFFFF"))
         lbl_cat.setAlpha(0.85)
@@ -2263,7 +3137,7 @@ class Plugin(BasePlugin):
         content.addView(lbl_cat, lp_lbl_cat)
 
         category_input = EditText(activity)
-        category_input.setHint("например: Новости, Мемы, Работа")
+        category_input.setHint(_tr("например: Новости, Мемы, Работа", "e.g.: News, Memes, Work"))
         category_input.setSingleLine(True)
         category_input.setPadding(_dp(12), _dp(12), _dp(12), _dp(12))
         category_input.setTextColor(_c("#FFFFFFFF"))
@@ -2280,7 +3154,7 @@ class Plugin(BasePlugin):
         push.setLayoutParams(LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1.0))
         content.addView(push)
 
-        add_btn = self._primary_button(activity, "Добавить", lambda: self._add_sub_from_input(url_input, category_input))
+        add_btn = self._primary_button(activity, _tr("Добавить", "Add"), lambda: self._add_sub_from_input(url_input, category_input))
         content.addView(add_btn, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ))
@@ -2288,7 +3162,7 @@ class Plugin(BasePlugin):
         self._add_overlay = overlay
         self._add_content = content
         decor.addView(overlay)
-        self._bind_back_handler(overlay, lambda: self._close_add_feed_screen(animated=True), "_add_back_listener")
+        self._bind_back_handler(overlay, lambda: self._handle_back_action(), "_add_back_listener")
 
         try:
             overlay.setAlpha(0.0)
@@ -2325,6 +3199,8 @@ class Plugin(BasePlugin):
             entries.append({"sub": sub, "category": category})
         self._set_sub_entries(entries)
 
+        if self._overlay is not None:
+            self._set_refreshing_ui(True)
         self._refresh_async()
         self._close_add_feed_screen(animated=True)
 
@@ -2419,7 +3295,7 @@ class Plugin(BasePlugin):
         top.addView(back)
 
         title = TextView(activity)
-        title.setText("Категория подписки")
+        title.setText(_tr("Категория подписки", "Subscription category"))
         title.setTextSize(20)
         title.setTextColor(_c("#FFFFFFFF"))
         top.addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
@@ -2434,7 +3310,7 @@ class Plugin(BasePlugin):
         content.addView(source_tv)
 
         category_input = EditText(activity)
-        category_input.setHint("Любая категория")
+        category_input.setHint(_tr("Любая категория", "Any category"))
         category_input.setSingleLine(True)
         category_input.setText(_norm_category(target.get("category", "")))
         category_input.setPadding(_dp(12), _dp(12), _dp(12), _dp(12))
@@ -2452,7 +3328,7 @@ class Plugin(BasePlugin):
         push.setLayoutParams(LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1.0))
         content.addView(push)
 
-        save_btn = self._primary_button(activity, "Сохранить", lambda: self._save_sub_category(sub_key, category_input))
+        save_btn = self._primary_button(activity, _tr("Сохранить", "Save"), lambda: self._save_sub_category(sub_key, category_input))
         content.addView(save_btn, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ))
@@ -2460,7 +3336,7 @@ class Plugin(BasePlugin):
         self._cat_overlay = overlay
         self._cat_content = content
         decor.addView(overlay)
-        self._bind_back_handler(overlay, lambda: self._close_category_screen(animated=True), "_cat_back_listener")
+        self._bind_back_handler(overlay, lambda: self._handle_back_action(), "_cat_back_listener")
 
         try:
             overlay.setAlpha(0.0)
@@ -2490,6 +3366,8 @@ class Plugin(BasePlugin):
         self._close_category_screen(animated=True)
         if self._overlay is not None:
             self._render()
+            self._set_refreshing_ui(True)
+        self._refresh_async()
 
     def _close_category_screen(self, animated: bool):
         overlay = self._cat_overlay
@@ -2538,12 +3416,18 @@ class Plugin(BasePlugin):
             return
 
         title_raw = item.get("title", "") or ""
+        if not str(title_raw).strip():
+            title_raw = item.get("voice", "") or item.get("doc", "") or ""
         link = item.get("link", "")
         src = _format_source_line(item)
         cat = _norm_category(item.get("category", ""))
         sort_ts = int(item.get("sort_ts", 0) or 0)
         body_raw = item.get("text", "") or ""
-        img = item.get("image", "") or ""
+        images = _norm_images_list(item.get("images", []))
+        if not images:
+            one = _upgrade_image_url(item.get("image", ""))
+            if one:
+                images = [one]
 
         title = _strip_tags_and_format(title_raw)
         body = _strip_tags_and_format(body_raw)
@@ -2581,12 +3465,12 @@ class Plugin(BasePlugin):
         top.addView(back)
 
         t = TextView(activity)
-        t.setText("Пост")
+        t.setText(_tr("Пост", "Post"))
         t.setTextSize(20)
         t.setTextColor(_c("#FFFFFFFF"))
         top.addView(t, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
 
-        go_btn = self._top_button(activity, "Перейти", lambda: self._open_link(get_last_fragment(), link))
+        go_btn = self._top_button(activity, _tr("Перейти", "Open"), lambda: self._open_link(get_last_fragment(), link))
         top.addView(go_btn)
 
         sv = ScrollView(activity)
@@ -2605,6 +3489,7 @@ class Plugin(BasePlugin):
             tv_title = TextView(activity)
             tv_title.setText(title)
             tv_title.setTextSize(22)
+            tv_title.setTypeface(None, Typeface.BOLD)
             tv_title.setTextColor(_c("#FFFFFFFF"))
             tv_title.setPadding(0, _dp(10), 0, _dp(10))
             col.addView(tv_title)
@@ -2646,25 +3531,47 @@ class Plugin(BasePlugin):
             lp.bottomMargin = _dp(12)
             col.addView(chip, lp)
 
-        if img:
+        loading_left = len(images)
+        loading_tv = None
+        if len(images) > 1:
+            loading_tv = TextView(activity)
+            loading_tv.setText(_tr("Загрузка изображений…", "Loading images…"))
+            loading_tv.setTextSize(12)
+            loading_tv.setTextColor(_c("#FFFFFFFF"))
+            loading_tv.setAlpha(0.66)
+            loading_tv.setPadding(0, 0, 0, _dp(8))
+            col.addView(loading_tv)
+
+        for img_idx, img_url in enumerate(images):
             iv = ImageView(activity)
             iv.setVisibility(View.GONE)
             iv.setAdjustViewBounds(True)
             try:
-                iv.setScaleType(ImageView.ScaleType.CENTER_CROP)
+                iv.setScaleType(ImageView.ScaleType.FIT_CENTER)
             except Exception:
                 pass
             iv.setBackground(self._bg_rounded("#00000000"))
             self._apply_rounded_clip(iv)
 
             iv.setClickable(True)
-            u = img
-            iv.setOnClickListener(OnClickListener(lambda _v: self._open_image_screen(get_last_fragment(), u)))
+            u = img_url
+            iv.setOnClickListener(OnClickListener(lambda _v, uu=u: self._open_image_screen(get_last_fragment(), uu)))
 
-            ilp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            ilp.bottomMargin = _dp(12)
+            ilp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, _dp(520))
+            ilp.bottomMargin = _dp(8 if img_idx < len(images) - 1 else 12)
             col.addView(iv, ilp)
-            self._load_image_into(img, iv)
+            def _img_done(_ok, _tv=loading_tv):
+                nonlocal loading_left
+                try:
+                    loading_left = max(0, int(loading_left) - 1)
+                    if _tv is not None:
+                        if loading_left <= 0:
+                            _tv.setVisibility(View.GONE)
+                        else:
+                            _tv.setText((_tr("Загрузка изображений", "Loading images") + f": {int(loading_left)}"))
+                except Exception:
+                    pass
+            self._load_image_into(img_url, iv, preview=True, on_done=_img_done)
 
         if body:
             tv_body = TextView(activity)
@@ -2675,7 +3582,7 @@ class Plugin(BasePlugin):
             tv_body.setPadding(0, 0, 0, _dp(16))
             col.addView(tv_body)
 
-        bottom_go = self._primary_button(activity, "Перейти", lambda: self._open_link(get_last_fragment(), link))
+        bottom_go = self._primary_button(activity, _tr("Перейти", "Open"), lambda: self._open_link(get_last_fragment(), link))
         col.addView(bottom_go, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ))
@@ -2683,7 +3590,7 @@ class Plugin(BasePlugin):
         self._post_overlay = overlay
         self._post_content = content
         decor.addView(overlay)
-        self._bind_back_handler(overlay, lambda: self._close_post_screen(animated=True), "_post_back_listener")
+        self._bind_back_handler(overlay, lambda: self._handle_back_action(), "_post_back_listener")
         content.addView(sv)
 
         try:
@@ -2780,12 +3687,12 @@ class Plugin(BasePlugin):
         top.addView(back)
 
         t = TextView(activity)
-        t.setText("Изображение")
+        t.setText(_tr("Изображение", "Image"))
         t.setTextSize(20)
         t.setTextColor(_c("#FFFFFFFF"))
         top.addView(t, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
 
-        open_btn = self._top_button(activity, "Открыть", lambda: self._open_link(get_last_fragment(), url))
+        open_btn = self._top_button(activity, _tr("Открыть", "Open"), lambda: self._open_link(get_last_fragment(), url))
         top.addView(open_btn)
 
         sv = ScrollView(activity)
@@ -2818,7 +3725,7 @@ class Plugin(BasePlugin):
         self._img_overlay = overlay
         self._img_content = content
         decor.addView(overlay)
-        self._bind_back_handler(overlay, lambda: self._close_image_screen(animated=True), "_img_back_listener")
+        self._bind_back_handler(overlay, lambda: self._handle_back_action(), "_img_back_listener")
 
         try:
             overlay.setAlpha(0.0)
@@ -2865,17 +3772,24 @@ class Plugin(BasePlugin):
             run_on_ui_thread(detach)
 
     # ---------- image loading ----------
-    def _load_image_into(self, url: str, iv: ImageView):
+    def _load_image_into(self, url: str, iv: ImageView, preview: bool = False, on_done=None):
+        url = _upgrade_image_url(url)
         if not url:
             return
 
+        cache_key = (url + "|preview") if preview else url
         with self._img_cache_lock:
-            bmp = self._img_cache.get(url)
+            bmp = self._img_cache.get(cache_key)
 
         if bmp is not None:
             try:
                 iv.setImageBitmap(bmp)
                 iv.setVisibility(View.VISIBLE)
+            except Exception:
+                pass
+            try:
+                if on_done is not None:
+                    on_done(True)
             except Exception:
                 pass
             return
@@ -2885,19 +3799,36 @@ class Plugin(BasePlugin):
                 req = urllib.request.Request(url, headers={"User-Agent": "Exteragram-RSS-Plugin/1.4.4"})
                 with urllib.request.urlopen(req, timeout=14) as resp:
                     data = resp.read()
-                bmp2 = BitmapFactory.decodeByteArray(data, 0, len(data))
+                bmp2 = None
+                try:
+                    if Bitmap is not None:
+                        opts = BitmapFactory.Options()
+                        opts.inPreferredConfig = Bitmap.Config.ARGB_8888
+                        opts.inScaled = False
+                        if preview:
+                            opts.inSampleSize = 3
+                        bmp2 = BitmapFactory.decodeByteArray(data, 0, len(data), opts)
+                except Exception:
+                    bmp2 = None
+                if bmp2 is None:
+                    bmp2 = BitmapFactory.decodeByteArray(data, 0, len(data))
                 if bmp2 is None:
                     return
 
                 with self._img_cache_lock:
                     if len(self._img_cache) > 80:
                         self._img_cache.clear()
-                    self._img_cache[url] = bmp2
+                    self._img_cache[cache_key] = bmp2
 
                 def ui():
                     try:
                         iv.setImageBitmap(bmp2)
                         iv.setVisibility(View.VISIBLE)
+                    except Exception:
+                        pass
+                    try:
+                        if on_done is not None:
+                            on_done(True)
                     except Exception:
                         pass
                 run_on_ui_thread(ui)
@@ -2922,6 +3853,8 @@ class Plugin(BasePlugin):
         try:
             if self._mode == "subs":
                 self._render_subs(ctx)
+            elif self._mode == "settings":
+                self._render_settings(ctx)
             elif self._mode == "cats":
                 self._render_feed(ctx, by_category=True)
             else:
@@ -2929,11 +3862,12 @@ class Plugin(BasePlugin):
         except Exception as e:
             log(f"[RSS] render error: {e}")
             t = TextView(ctx)
-            t.setText("Ошибка отображения ленты (см. log).")
+            t.setText(_tr("Ошибка отображения ленты (см. log).", "Failed to render feed (see log)."))
             t.setTextSize(14)
             t.setTextColor(_c("#FFFFFFFF"))
             t.setAlpha(0.75)
             self._list_container.addView(t)
+        self._animate_list_once = False
 
     def _render_feed(self, ctx, by_category: bool = False):
         all_items = self._get_cache()
@@ -2941,7 +3875,7 @@ class Plugin(BasePlugin):
 
         if not all_items:
             t = TextView(ctx)
-            t.setText("Лента пустая.\nОткрой «Подписки» и нажми «+», затем потяни ленту вниз для обновления.")
+            t.setText(_tr("Лента пустая.\nОткрой «Подписки» и нажми «+», затем потяни ленту вниз для обновления.", "Feed is empty.\nOpen Subscriptions and tap , then pull down to refresh."))
             t.setTextSize(14)
             t.setTextColor(_c("#FFFFFFFF"))
             t.setAlpha(0.75)
@@ -2970,9 +3904,9 @@ class Plugin(BasePlugin):
         if not items:
             t = TextView(ctx)
             if by_category:
-                t.setText("По выбранной категории пока ничего нет.\nНажми «Категория», чтобы выбрать другую или «все».")
+                t.setText(_tr("По выбранной категории пока ничего нет.\nНажми «Категория», чтобы выбрать другую или «все».", "No items for the selected category yet.\nTap Category to choose another or all."))
             else:
-                t.setText("По выбранному источнику пока ничего нет.\nНажми кнопку «Источник», чтобы переключить фильтр на «все».")
+                t.setText(_tr("По выбранному источнику пока ничего нет.\nНажми кнопку «Источник», чтобы переключить фильтр на «все».", "No items for the selected source yet.\nTap Source to switch filter to all."))
             t.setTextSize(14)
             t.setTextColor(_c("#FFFFFFFF"))
             t.setAlpha(0.75)
@@ -2982,8 +3916,8 @@ class Plugin(BasePlugin):
         if by_category:
             info = TextView(ctx)
             info.setText(
-                f"Категории: {self._category_filter}" if self._category_filter
-                else "Категории: все"
+                (_tr("Категории", "Categories") + f": {self._category_filter}") if self._category_filter
+                else (_tr("Категории", "Categories") + ": " + _tr("все", "all"))
             )
             info.setTextSize(13)
             info.setTextColor(_c("#FFFFFFFF"))
@@ -2992,34 +3926,73 @@ class Plugin(BasePlugin):
             self._list_container.addView(info)
 
         items.sort(key=lambda x: int(x.get("sort_ts", x.get("ts", 0) or 0) or 0), reverse=True)
+        try:
+            self._feed_item_touch_listener = _OnTouchListener(lambda _v, ev: self._handle_item_swipe_touch(ev))
+        except Exception:
+            self._feed_item_touch_listener = None
 
         for idx, it in enumerate(items[:320]):
             title = _strip_tags_and_format(str(it.get("title", "") or ""))
+            if not title:
+                title = _strip_tags_and_format(str(it.get("voice", "") or ""))[:120]
+            if not title:
+                title = _strip_tags_and_format(str(it.get("doc", "") or ""))[:120]
             src = _format_source_line(it)
             cat = _norm_category(it.get("category", ""))
             sort_ts = int(it.get("sort_ts", 0) or 0)
-            img = str(it.get("image", "") or "")
+            images = _norm_images_list(it.get("images", []))
+            if not images:
+                one = _upgrade_image_url(it.get("image", ""))
+                if one:
+                    images = [one]
+            img = images[0] if images else ""
             text = str(it.get("text", "") or "")
             important = ("(!)" in title) or ("(!)" in text)
+            veryimportant = ("(!!)" in title) or ("(!!)" in text)
 
             block = LinearLayout(ctx)
             block.setOrientation(LinearLayout.VERTICAL)
             block.setPadding(_dp(10), _dp(10), _dp(10), _dp(10))
             block.setClickable(True)
             block.setOnClickListener(OnClickListener(lambda _v, item=it: self._open_post_screen(get_last_fragment(), item)))
+            def _block_touch(v, ev):
+                try:
+                    try:
+                        act = int(ev.getActionMasked())
+                    except Exception:
+                        act = int(ev.getAction())
+                    if act == MotionEvent.ACTION_DOWN:
+                        v.animate().cancel()
+                        v.animate().scaleX(0.985).scaleY(0.985).setDuration(80).start()
+                    elif act in (MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL):
+                        v.animate().cancel()
+                        v.animate().scaleX(1.0).scaleY(1.0).setDuration(110).start()
+                except Exception:
+                    pass
+                return self._handle_item_swipe_touch(ev)
+            try:
+                block.setOnTouchListener(_OnTouchListener(_block_touch))
+            except Exception:
+                pass
 
-            block.setBackground(self._bg_rounded("#33FFEB3B" if important else "#141AFFFFFF"))
+            if important or veryimportant:
+                block.setBackground(self._bg_important_gradient())
+            else:
+                block.setBackground(self._bg_rounded("#141AFFFFFF"))
             lp_block = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             lp_block.bottomMargin = _dp(10)
             self._list_container.addView(block, lp_block)
-            self._animate_entry(block, idx)
+            if self._animate_list_once and idx < 12:
+                self._animate_entry(block, idx)
 
             # ✅ если title пустой — не показываем его вообще
             if title:
                 tv_title = TextView(ctx)
                 tv_title.setText(title)
-                tv_title.setTextSize(16)
-                tv_title.setTextColor(_c("#FFF7E05A" if important else "#FFFFFFFF"))
+                tv_title.setTextSize(32 if veryimportant else (22 if important else 16))
+                tv_title.setTextColor(_c("#FFFF0000" if veryimportant else ("#FFFFFFFF" if important else "#EFEFEFEF")))
+                tv_title.setTypeface(None, Typeface.BOLD)
+                tv_title.invalidate()
                 tv_title.setAlpha(0.98)
                 tv_title.setPadding(0, 0, 0, _dp(6))
                 block.addView(tv_title)
@@ -3078,17 +4051,276 @@ class Plugin(BasePlugin):
                 iv.setBackground(self._bg_rounded("#00000000"))
                 self._apply_rounded_clip(iv)
 
-                ilp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, _dp(90))
+                ilp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, _dp(250))
                 ilp.bottomMargin = _dp(2)
                 block.addView(iv, ilp)
 
-                self._load_image_into(img, iv)
+                self._load_image_into(img, iv, preview=True)
+                if len(images) > 1:
+                    tv_more = TextView(ctx)
+                    tv_more.setText((_tr("Ещё изображений", "More images") + f": {len(images) - 1}"))
+                    tv_more.setTextSize(11)
+                    tv_more.setTextColor(_c("#FFFFFFFF"))
+                    tv_more.setAlpha(0.62)
+                    tv_more.setPadding(0, _dp(4), 0, 0)
+                    block.addView(tv_more)
+
+    def _render_settings(self, ctx):
+        h = TextView(ctx)
+        h.setText(_tr("Настройки", "Settings"))
+        h.setTextSize(18)
+        h.setTypeface(None, Typeface.BOLD)
+        h.setTextColor(_c("#FFFFFFFF"))
+        h.setPadding(0, _dp(6), 0, _dp(10))
+        self._list_container.addView(h)
+
+        hint = TextView(ctx)
+        hint.setText(_tr("Масштаб интерфейса (DPI)", "Interface scale (DPI)"))
+        hint.setTextSize(13)
+        hint.setTextColor(_c("#FFFFFFFF"))
+        hint.setAlpha(0.75)
+        hint.setPadding(0, 0, 0, _dp(10))
+        self._list_container.addView(hint)
+
+        card = LinearLayout(ctx)
+        card.setOrientation(LinearLayout.VERTICAL)
+        card.setPadding(_dp(12), _dp(12), _dp(12), _dp(12))
+        card.setBackground(self._bg_rounded("#1E1AFFFFFF", "#24FFFFFF", 0.0))
+        lp_card = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp_card.bottomMargin = _dp(12)
+        self._list_container.addView(card, lp_card)
+
+        val_tv = TextView(ctx)
+        val_tv.setText((_tr("Текущий масштаб", "Current scale") + f": {self._ui_scale_percent()}%"))
+        val_tv.setTextSize(14)
+        val_tv.setTextColor(_c("#FFFFFFFF"))
+        val_tv.setTypeface(None, Typeface.BOLD)
+        val_tv.setPadding(0, 0, 0, _dp(8))
+        card.addView(val_tv)
+
+        sb = SeekBar(ctx)
+        max_progress = max(1, self._ui_scale_to_progress(_UI_SCALE_MAX))
+        cur_progress = self._ui_scale_to_progress(self._ui_scale)
+        try:
+            sb.setMax(max_progress)
+            sb.setProgress(max(0, min(max_progress, cur_progress)))
+        except Exception:
+            pass
+        card.addView(sb, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+
+        scale_range = TextView(ctx)
+        scale_range.setText((_tr("Диапазон", "Range") + f": {int(_UI_SCALE_MIN * 100)}% - {int(_UI_SCALE_MAX * 100)}%"))
+        scale_range.setTextSize(12)
+        scale_range.setTextColor(_c("#FFFFFFFF"))
+        scale_range.setAlpha(0.62)
+        scale_range.setPadding(0, _dp(6), 0, 0)
+        card.addView(scale_range)
+
+        def on_progress(_sb, progress, from_user):
+            try:
+                if not from_user:
+                    return
+                val = self._progress_to_ui_scale(int(progress))
+                val_tv.setText((_tr("Текущий масштаб", "Current scale") + f": {int(round(val * 100))}%"))
+            except Exception:
+                pass
+
+        def on_stop(_sb):
+            try:
+                val = self._progress_to_ui_scale(int(_sb.getProgress() or 0))
+                self._apply_ui_scale_and_reopen(val)
+            except Exception:
+                pass
+
+        try:
+            self._ui_seek_listener = _OnSeekBarChangeListener(on_progress, None, on_stop)
+            sb.setOnSeekBarChangeListener(self._ui_seek_listener)
+        except Exception as e:
+            log(f"[RSS] settings seekbar bind error: {e}")
+
+        # --- UI padding ---
+        hint_pad = TextView(ctx)
+        hint_pad.setText(_tr("Отступ нижнего таба от низа (dp)", "Bottom tab offset (dp)"))
+        hint_pad.setTextSize(13)
+        hint_pad.setTextColor(_c("#FFFFFFFF"))
+        hint_pad.setAlpha(0.75)
+        hint_pad.setPadding(0, _dp(8), 0, _dp(10))
+        self._list_container.addView(hint_pad)
+
+        card_pad = LinearLayout(ctx)
+        card_pad.setOrientation(LinearLayout.VERTICAL)
+        card_pad.setPadding(_dp(12), _dp(12), _dp(12), _dp(12))
+        card_pad.setBackground(self._bg_rounded("#1E1AFFFFFF", "#24FFFFFF", 0.0))
+        lp_card_pad = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp_card_pad.bottomMargin = _dp(12)
+        self._list_container.addView(card_pad, lp_card_pad)
+
+        val_pad_tv = TextView(ctx)
+        val_pad_tv.setText((_tr("Текущий отступ таба", "Current tab offset") + f": {int(self._ui_pad)}dp"))
+        val_pad_tv.setTextSize(14)
+        val_pad_tv.setTextColor(_c("#FFFFFFFF"))
+        val_pad_tv.setTypeface(None, Typeface.BOLD)
+        val_pad_tv.setPadding(0, 0, 0, _dp(8))
+        card_pad.addView(val_pad_tv)
+
+        sb_pad = SeekBar(ctx)
+        max_pad_progress = max(1, self._ui_pad_to_progress(_UI_PAD_MAX))
+        cur_pad_progress = self._ui_pad_to_progress(self._ui_pad)
+        try:
+            sb_pad.setMax(max_pad_progress)
+            sb_pad.setProgress(max(0, min(max_pad_progress, cur_pad_progress)))
+        except Exception:
+            pass
+        card_pad.addView(sb_pad, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+
+        pad_range = TextView(ctx)
+        pad_range.setText((_tr("Диапазон", "Range") + f": {_UI_PAD_MIN}dp - {_UI_PAD_MAX}dp"))
+        pad_range.setTextSize(12)
+        pad_range.setTextColor(_c("#FFFFFFFF"))
+        pad_range.setAlpha(0.62)
+        pad_range.setPadding(0, _dp(6), 0, 0)
+        card_pad.addView(pad_range)
+
+        def on_pad_progress(_sb, progress, from_user):
+            try:
+                if not from_user:
+                    return
+                val = self._progress_to_ui_pad(int(progress))
+                val_pad_tv.setText((_tr("Текущий отступ таба", "Current tab offset") + f": {int(val)}dp"))
+            except Exception:
+                pass
+
+        def on_pad_stop(_sb):
+            try:
+                val = self._progress_to_ui_pad(int(_sb.getProgress() or 0))
+                self._apply_ui_pad_and_reopen(val)
+            except Exception:
+                pass
+
+        try:
+            self._ui_pad_seek_listener = _OnSeekBarChangeListener(on_pad_progress, None, on_pad_stop)
+            sb_pad.setOnSeekBarChangeListener(self._ui_pad_seek_listener)
+        except Exception as e:
+            log(f"[RSS] settings pad seekbar bind error: {e}")
+
+        hint_round = TextView(ctx)
+        hint_round.setText(_tr("Общее закругление (%)", "Global roundness (%)"))
+        hint_round.setTextSize(13)
+        hint_round.setTextColor(_c("#FFFFFFFF"))
+        hint_round.setAlpha(0.75)
+        hint_round.setPadding(0, _dp(8), 0, _dp(10))
+        self._list_container.addView(hint_round)
+
+        card_round = LinearLayout(ctx)
+        card_round.setOrientation(LinearLayout.VERTICAL)
+        card_round.setPadding(_dp(12), _dp(12), _dp(12), _dp(12))
+        card_round.setBackground(self._bg_rounded("#1E1AFFFFFF", "#24FFFFFF", 0.0))
+        lp_card_round = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp_card_round.bottomMargin = _dp(12)
+        self._list_container.addView(card_round, lp_card_round)
+
+        val_round_tv = TextView(ctx)
+        val_round_tv.setText((_tr("Текущее закругление", "Current roundness") + f": {int(self._round_pct)}%"))
+        val_round_tv.setTextSize(14)
+        val_round_tv.setTextColor(_c("#FFFFFFFF"))
+        val_round_tv.setTypeface(None, Typeface.BOLD)
+        val_round_tv.setPadding(0, 0, 0, _dp(8))
+        card_round.addView(val_round_tv)
+
+        sb_round = SeekBar(ctx)
+        try:
+            sb_round.setMax(int(_ROUND_PCT_MAX - _ROUND_PCT_MIN))
+            sb_round.setProgress(max(0, min(int(_ROUND_PCT_MAX - _ROUND_PCT_MIN), int(self._round_pct - _ROUND_PCT_MIN))))
+        except Exception:
+            pass
+        card_round.addView(sb_round, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        def on_round_progress(_sb, progress, from_user):
+            try:
+                if not from_user:
+                    return
+                val = _clamp_round_pct(_ROUND_PCT_MIN + int(progress))
+                val_round_tv.setText((_tr("Текущее закругление", "Current roundness") + f": {int(val)}%"))
+            except Exception:
+                pass
+
+        def on_round_stop(_sb):
+            try:
+                val = _clamp_round_pct(_ROUND_PCT_MIN + int(_sb.getProgress() or 0))
+                self._set_round_pct(val, persist=True)
+                self._reopen_overlay()
+            except Exception:
+                pass
+
+        try:
+            self._round_seek_listener = _OnSeekBarChangeListener(on_round_progress, None, on_round_stop)
+            sb_round.setOnSeekBarChangeListener(self._round_seek_listener)
+        except Exception as e:
+            log(f"[RSS] settings round seekbar bind error: {e}")
+
+        hint_accent = TextView(ctx)
+        hint_accent.setText(_tr("Акцентный цвет (#RRGGBB)", "Accent color (#RRGGBB)"))
+        hint_accent.setTextSize(13)
+        hint_accent.setTextColor(_c("#FFFFFFFF"))
+        hint_accent.setAlpha(0.75)
+        hint_accent.setPadding(0, _dp(8), 0, _dp(10))
+        self._list_container.addView(hint_accent)
+
+        accent_row = LinearLayout(ctx)
+        accent_row.setOrientation(LinearLayout.HORIZONTAL)
+        accent_row.setGravity(Gravity.CENTER_VERTICAL)
+        accent_row.setPadding(_dp(12), _dp(10), _dp(12), _dp(10))
+        accent_row.setBackground(self._bg_rounded("#1E1AFFFFFF", "#24FFFFFF", 0.0))
+        lp_accent = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp_accent.bottomMargin = _dp(12)
+        self._list_container.addView(accent_row, lp_accent)
+
+        accent_input = EditText(ctx)
+        accent_input.setText(self._accent_hex)
+        accent_input.setTextColor(_c("#FFFFFFFF"))
+        accent_input.setHintTextColor(_c("#66FFFFFF"))
+        accent_input.setHint("#A259FF")
+        accent_input.setSingleLine(True)
+        accent_input.setBackground(self._bg_rounded("#1AFFFFFF"))
+        accent_input.setPadding(_dp(10), _dp(8), _dp(10), _dp(8))
+        accent_row.addView(accent_input, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
+
+        def apply_accent():
+            try:
+                txt = accent_input.getText()
+                raw = txt.toString().strip() if txt is not None else ""
+            except Exception:
+                raw = ""
+            self._set_accent_hex(raw, persist=True)
+            self._reopen_overlay()
+
+        apply_accent_btn = self._primary_button(ctx, _tr("Применить", "Apply"), apply_accent)
+        lp_apply_accent = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp_apply_accent.leftMargin = _dp(8)
+        accent_row.addView(apply_accent_btn, lp_apply_accent)
+
+        reset_accent_btn = self._primary_button(ctx, _tr("Сбросить акцент", "Reset accent"), lambda: (self._set_accent_hex("#A259FF", persist=True), self._reopen_overlay()))
+        self._list_container.addView(reset_accent_btn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        reset_btn = self._primary_button(ctx, _tr("Сбросить: 100%", "Reset: 100%"), lambda: self._apply_ui_scale_and_reopen(1.0))
+        self._list_container.addView(reset_btn, LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ))
+
+        reset_pad_btn = self._primary_button(ctx, _tr("Сбросить отступ таба: 16dp", "Reset tab offset: 16dp"), lambda: self._apply_ui_pad_and_reopen(16))
+        lp_reset_pad = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp_reset_pad.topMargin = _dp(8)
+        self._list_container.addView(reset_pad_btn, lp_reset_pad)
 
     def _render_subs(self, ctx):
         entries = self._get_sub_entries()
 
         h = TextView(ctx)
-        h.setText("Подписки")
+        h.setText(_tr("Подписки", "Subscriptions"))
         h.setTextSize(18)
         h.setTextColor(_c("#FFFFFFFF"))
         h.setPadding(0, _dp(6), 0, _dp(12))
@@ -3096,7 +4328,7 @@ class Plugin(BasePlugin):
 
         if not entries:
             t = TextView(ctx)
-            t.setText("Подписок нет.\nНажми «+» и вставь RSS или @username.")
+            t.setText(_tr("Подписок нет.\nНажми «+» и вставь RSS или username/@username/ссылку.", "No subscriptions.\nTap  and paste RSS or Telegram username/@username/link."))
             t.setTextSize(14)
             t.setTextColor(_c("#FFFFFFFF"))
             t.setAlpha(0.75)
@@ -3110,7 +4342,9 @@ class Plugin(BasePlugin):
                 row.setGravity(Gravity.CENTER_VERTICAL)
                 row.setPadding(0, _dp(10), 0, _dp(10))
                 self._list_container.addView(row)
-                self._animate_entry(row, idx)
+                row.setBackground(self._bg_rounded("#201AFFFFFF"))  # было #141AFFFFFF
+                if self._animate_list_once and idx < 12:
+                    self._animate_entry(row, idx)
 
                 show = ("@" + sub.split(":", 1)[1]) if sub.startswith("tguser:") else sub
 
@@ -3127,14 +4361,14 @@ class Plugin(BasePlugin):
 
                 if cat:
                     tv_cat = TextView(ctx)
-                    tv_cat.setText(f"Категория: {cat}")
+                    tv_cat.setText((_tr("Категория", "Category") + f": {cat}"))
                     tv_cat.setTextSize(12)
                     tv_cat.setTextColor(_c("#FFFFFFFF"))
                     tv_cat.setAlpha(0.62)
                     tv_cat.setPadding(0, _dp(3), 0, 0)
                     txt_col.addView(tv_cat)
 
-                cat_btn = self._top_button(ctx, "Кат.", lambda key=sub: self._open_category_screen(key))
+                cat_btn = self._top_button(ctx, _tr("Кат.", "Cat."), lambda key=sub: self._open_category_screen(key))
                 delb = self._top_button(ctx, "—", lambda key=sub: self._remove_sub(key))
                 row.addView(cat_btn)
                 row.addView(self._spacer_h(ctx, 8))
@@ -3150,7 +4384,163 @@ class Plugin(BasePlugin):
         lp_plus.topMargin = _dp(14)
         lp_plus.bottomMargin = _dp(4)
         self._list_container.addView(plus_btn, lp_plus)
-        self._animate_entry(plus_btn, 2)
+        if self._animate_list_once:
+            self._animate_entry(plus_btn, 2)
+
+    def _set_main_overlays_visibility(self, visible: bool):
+        vis = View.VISIBLE if visible else View.GONE
+        for ov in (self._overlay, self._add_overlay, self._cat_overlay, self._src_overlay, self._post_overlay, self._img_overlay):
+            if ov is None:
+                continue
+            try:
+                ov.setVisibility(vis)
+            except Exception:
+                pass
+
+    def _close_mini_overlay(self, animated: bool = True):
+        mini = self._mini_overlay
+        if mini is None:
+            return
+
+        def detach():
+            try:
+                parent = mini.getParent()
+                if parent and isinstance(parent, ViewGroup):
+                    parent.removeView(mini)
+            except Exception:
+                pass
+            self._mini_overlay = None
+            self._mini_link = ""
+            self._mini_back_listener = None
+            self._back_tracking_paused = False
+
+        if not animated:
+            detach()
+            return
+
+        try:
+            mini.animate().alpha(0.0).scaleX(0.92).scaleY(0.92).setDuration(140).start()
+        except Exception:
+            detach()
+            return
+
+        try:
+            AndroidUtilities.runOnUIThread(Runnable(detach), 150)
+        except Exception:
+            run_on_ui_thread(detach)
+
+    def _dismiss_mini_and_close_plugin(self):
+        # Закрыть мини-виджет и полностью закрыть интерфейс плагина,
+        # чтобы следующий вызов _open не упирался в скрытый overlay.
+        self._back_tracking_paused = False
+        self._set_main_overlays_visibility(True)
+        self._close_mini_overlay(animated=True)
+        try:
+            self._close_source_picker_screen(animated=False)
+            self._close_add_feed_screen(animated=False)
+            self._close_category_screen(animated=False)
+            self._close_post_screen(animated=False)
+            self._close_image_screen(animated=False)
+            self._close(animated=False)
+        except Exception:
+            pass
+
+    def _restore_from_mini(self):
+        self._back_tracking_paused = False
+        self._set_main_overlays_visibility(True)
+        try:
+            for ov in (self._overlay, self._add_overlay, self._cat_overlay, self._src_overlay, self._post_overlay, self._img_overlay):
+                if ov is None:
+                    continue
+                ov.setAlpha(0.0)
+                ov.animate().alpha(1.0).setDuration(170).start()
+        except Exception:
+            pass
+        self._close_mini_overlay(animated=True)
+
+    def _minimize_to_mini_overlay(self, fragment, link: str):
+        if self._mini_overlay is not None:
+            self._mini_link = str(link or "")
+            return
+        if not fragment:
+            fragment = get_last_fragment()
+        if not fragment:
+            return
+        activity = fragment.getParentActivity()
+        if not activity:
+            return
+        decor = activity.getWindow().getDecorView()
+        if not isinstance(decor, ViewGroup):
+            return
+
+        self._set_main_overlays_visibility(False)
+        self._back_tracking_paused = True
+
+        mini = FrameLayout(activity)
+        mini.setClickable(True)
+        mini.setFocusable(True)
+        # Без обводки: только заливка, визуально как всплывающее уведомление.
+        mini.setBackground(self._bg_rounded("#E6191C26"))
+        mini.setPadding(_dp(14), _dp(12), _dp(14), _dp(12))
+        try:
+            mini.setMinimumWidth(_dp(210))
+        except Exception:
+            pass
+
+        row = LinearLayout(activity)
+        row.setOrientation(LinearLayout.HORIZONTAL)
+        row.setGravity(Gravity.CENTER_VERTICAL)
+        mini.addView(row)
+
+        close_btn = TextView(activity)
+        close_btn.setText("✕")
+        close_btn.setTextSize(13)
+        close_btn.setTextColor(_c("#FFFFFFFF"))
+        close_btn.setAlpha(0.90)
+        close_btn.setClickable(True)
+        close_btn.setPadding(0, 0, _dp(8), 0)
+        close_btn.setOnClickListener(OnClickListener(lambda _v: self._dismiss_mini_and_close_plugin()))
+        row.addView(close_btn)
+
+        title_col = LinearLayout(activity)
+        title_col.setOrientation(LinearLayout.VERTICAL)
+        row.addView(title_col, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
+
+        title = TextView(activity)
+        title.setText(_tr("ExteraRSS свернуто", "ExteraRSS minimized"))
+        title.setTextSize(13)
+        title.setTextColor(_c("#FFFFFFFF"))
+        title.setAlpha(0.96)
+        title_col.addView(title)
+
+        sub = TextView(activity)
+        sub.setText(_tr("Нажмите, чтобы развернуть", "Tap to restore"))
+        sub.setTextSize(11)
+        sub.setTextColor(_c("#FFFFFFFF"))
+        sub.setAlpha(0.72)
+        sub.setPadding(0, _dp(2), 0, 0)
+        title_col.addView(sub)
+
+        mini.setOnClickListener(OnClickListener(lambda _v: self._restore_from_mini()))
+
+        lp = FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp.gravity = int(Gravity.END | Gravity.BOTTOM)
+        lp.rightMargin = _dp(16)
+        lp.bottomMargin = _dp(22)
+
+        decor.addView(mini, lp)
+        self._bind_back_handler(mini, lambda: self._handle_back_action(), "_mini_back_listener")
+
+        try:
+            mini.setAlpha(0.0)
+            mini.setScaleX(0.92)
+            mini.setScaleY(0.92)
+            mini.animate().alpha(1.0).scaleX(1.0).scaleY(1.0).setDuration(180).start()
+        except Exception:
+            pass
+
+        self._mini_overlay = mini
+        self._mini_link = str(link or "")
 
     def _remove_sub(self, sub_key: str):
         if not sub_key:
@@ -3158,6 +4548,9 @@ class Plugin(BasePlugin):
         entries = [x for x in self._get_sub_entries() if str(x.get("sub") or "") != sub_key]
         self._set_sub_entries(entries)
         self._render()
+        if self._overlay is not None:
+            self._set_refreshing_ui(True)
+        self._refresh_async()
 
     # ---------- open link ----------
     def _open_link(self, fragment, link: str):
@@ -3171,6 +4564,7 @@ class Plugin(BasePlugin):
         if not activity:
             return
         try:
+            self._minimize_to_mini_overlay(fragment, link)
             intent = Intent(Intent.ACTION_VIEW, Uri.parse(link))
             activity.startActivity(intent)
         except Exception as e:
