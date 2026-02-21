@@ -1093,8 +1093,8 @@ class Plugin(BasePlugin):
 
         self._source_filter: str = ""
         self._category_filter: str = ""
-        self._source_exclude_filter: str = ""
-        self._category_exclude_filter: str = ""
+        self._source_exclude_filters: List[str] = []
+        self._category_exclude_filters: List[str] = []
         self._source_btn: Optional[TextView] = None
         self._nav_feed_btn: Optional[TextView] = None
         self._nav_subs_btn: Optional[TextView] = None
@@ -1122,8 +1122,21 @@ class Plugin(BasePlugin):
         self._bg_thread_running = False
         self._unread_new_posts = max(0, int(self.get_setting("rss_unread_new", "0") or 0))
         self._img_preview_mode = str(self.get_setting("feed_img_preview_mode", "compact") or "compact").strip().lower()
-        self._source_exclude_filter = str(self.get_setting("source_exclude_filter", "") or "")
-        self._category_exclude_filter = _norm_category(self.get_setting("category_exclude_filter", "") or "")
+        src_ex_raw = self.get_setting("source_exclude_filters", "")
+        if not src_ex_raw:
+            src_old = str(self.get_setting("source_exclude_filter", "") or "")
+            self._source_exclude_filters = ([src_old] if src_old else [])
+        else:
+            src_arr = _safe_json_load(src_ex_raw, [])
+            self._source_exclude_filters = [str(x) for x in src_arr if str(x or "").strip()]
+
+        cat_ex_raw = self.get_setting("category_exclude_filters", "")
+        if not cat_ex_raw:
+            cat_old = _norm_category(self.get_setting("category_exclude_filter", "") or "")
+            self._category_exclude_filters = ([cat_old] if cat_old else [])
+        else:
+            cat_arr = _safe_json_load(cat_ex_raw, [])
+            self._category_exclude_filters = [_norm_category(x) for x in cat_arr if _norm_category(x)]
         if self._img_preview_mode not in ("compact", "full"):
             self._img_preview_mode = "compact"
         self._refresh_fade_token = 0
@@ -1312,9 +1325,23 @@ class Plugin(BasePlugin):
         try: raw_mode = self.get_setting("feed_img_preview_mode", self._img_preview_mode)
         except Exception: raw_mode = self._img_preview_mode
         self._set_img_preview_mode(raw_mode, persist=False)
-        try: self._source_exclude_filter = str(self.get_setting("source_exclude_filter", self._source_exclude_filter) or "")
+        try:
+            src_ex_raw = self.get_setting("source_exclude_filters", "")
+            if src_ex_raw:
+                src_arr = _safe_json_load(src_ex_raw, [])
+                self._source_exclude_filters = [str(x) for x in src_arr if str(x or "").strip()]
+            else:
+                src_old = str(self.get_setting("source_exclude_filter", "") or "")
+                self._source_exclude_filters = ([src_old] if src_old else [])
         except Exception: pass
-        try: self._category_exclude_filter = _norm_category(self.get_setting("category_exclude_filter", self._category_exclude_filter) or "")
+        try:
+            cat_ex_raw = self.get_setting("category_exclude_filters", "")
+            if cat_ex_raw:
+                cat_arr = _safe_json_load(cat_ex_raw, [])
+                self._category_exclude_filters = [_norm_category(x) for x in cat_arr if _norm_category(x)]
+            else:
+                cat_old = _norm_category(self.get_setting("category_exclude_filter", "") or "")
+                self._category_exclude_filters = ([cat_old] if cat_old else [])
         except Exception: pass
         try: raw_corner = self.get_setting("ui_corner_scale", f"{self._corner_scale:.2f}")
         except Exception: raw_corner = self._corner_scale
@@ -1721,20 +1748,12 @@ class Plugin(BasePlugin):
         except Exception: pass
 
     def _source_filter_label(self) -> str:
-        if self._source_exclude_filter:
-            name = self._source_exclude_filter
-            if len(name) > 14: name = name[:13].rstrip() + "…"
-            return _tr(f"кроме {name} ▾", f"except {name} ▾")
         if not self._source_filter: return _tr("Все источники ▾", "All sources ▾")
         name = self._source_filter
         if len(name) > 16: name = name[:15].rstrip() + "…"
         return f"{name} ▾"
 
     def _category_filter_label(self) -> str:
-        if self._category_exclude_filter:
-            name = self._category_exclude_filter
-            if len(name) > 14: name = name[:13].rstrip() + "…"
-            return _tr(f"кроме #{name} ▾", f"except #{name} ▾")
         if not self._category_filter: return _tr("Все категории ▾", "All categories ▾")
         name = self._category_filter
         if len(name) > 16: name = name[:15].rstrip() + "…"
@@ -1780,8 +1799,10 @@ class Plugin(BasePlugin):
         val = str(source_value or "")
         opts = self._source_filter_options()
         self._source_filter = val if val in opts else ""
-        self._source_exclude_filter = ""
-        try: self.set_setting("source_exclude_filter", "")
+        self._source_exclude_filters = []
+        try:
+            self.set_setting("source_exclude_filter", "")
+            self.set_setting("source_exclude_filters", "[]")
         except Exception: pass
         self._update_source_button()
         self._animate_list_once = False
@@ -1791,41 +1812,67 @@ class Plugin(BasePlugin):
         val = _norm_category(category_value)
         opts = self._category_filter_options()
         self._category_filter = val if val in opts else ""
-        self._category_exclude_filter = ""
-        try: self.set_setting("category_exclude_filter", "")
+        self._category_exclude_filters = []
+        try:
+            self.set_setting("category_exclude_filter", "")
+            self.set_setting("category_exclude_filters", "[]")
         except Exception: pass
         self._update_source_button()
         self._animate_list_once = False
         self._render()
 
-    def _set_source_exclude_filter(self, source_value: str):
+    def _set_source_exclude_filter(self, source_value: str) -> bool:
         val = str(source_value or "")
         opts = self._source_filter_options()
-        self._source_exclude_filter = val if val in opts else ""
+        if val not in opts or not val:
+            return False
+        arr = list(self._source_exclude_filters)
+        if val in arr:
+            arr = [x for x in arr if x != val]
+            is_excluded = False
+        else:
+            arr.append(val)
+            is_excluded = True
+        self._source_exclude_filters = _uniq_keep_order(arr)
         self._source_filter = ""
-        try: self.set_setting("source_exclude_filter", self._source_exclude_filter)
+        try:
+            self.set_setting("source_exclude_filter", "")
+            self.set_setting("source_exclude_filters", json.dumps(self._source_exclude_filters, ensure_ascii=False))
         except Exception: pass
         self._update_source_button()
         self._animate_list_once = False
         self._render()
+        return is_excluded
 
-    def _set_category_exclude_filter(self, category_value: str):
+    def _set_category_exclude_filter(self, category_value: str) -> bool:
         val = _norm_category(category_value)
         opts = self._category_filter_options()
-        self._category_exclude_filter = val if val in opts else ""
+        if val not in opts or not val:
+            return False
+        arr = list(self._category_exclude_filters)
+        if val in arr:
+            arr = [x for x in arr if x != val]
+            is_excluded = False
+        else:
+            arr.append(val)
+            is_excluded = True
+        self._category_exclude_filters = _uniq_keep_order(arr)
         self._category_filter = ""
-        try: self.set_setting("category_exclude_filter", self._category_exclude_filter)
+        try:
+            self.set_setting("category_exclude_filter", "")
+            self.set_setting("category_exclude_filters", json.dumps(self._category_exclude_filters, ensure_ascii=False))
         except Exception: pass
         self._update_source_button()
         self._animate_list_once = False
         self._render()
+        return is_excluded
 
     def _open_top_filter_picker(self):
         if self._mode in ("settings", "subs"): return
         if self._mode == "cats": self._open_category_picker_screen()
         else: self._open_source_picker_screen()
 
-    def _open_picker_screen(self, picker_title: str, options: List[Tuple[str, str]], current_value: str, on_select, on_long_select=None):
+    def _open_picker_screen(self, picker_title: str, options: List[Tuple[str, str]], current_value: str, on_select, on_long_select=None, excluded_values: Optional[List[str]] = None):
         if self._src_overlay is not None: return
         fragment = get_last_fragment()
         if not fragment: return
@@ -1883,9 +1930,16 @@ class Plugin(BasePlugin):
             btn.setTextColor(_c(COLOR_TEXT_PR))
             btn.setPadding(_dp(16), _dp(14), _dp(16), _dp(14))
             btn.setClickable(True)
+            excluded_set = set(str(x) for x in (excluded_values or []))
             selected = (value == current)
-            btn.setAlpha(1.0 if selected else 0.8)
-            btn.setBackground(self._bg_rounded(self._accent() if selected else "#08FFFFFF", radius_dp=16))
+            excluded = (value in excluded_set and bool(value))
+            btn.setAlpha(1.0 if (selected or excluded) else 0.8)
+            if excluded:
+                btn.setTextColor(_c("#FFFF6B6B"))
+                btn.setBackground(self._bg_rounded("#22FF6B6B", "#66FF6B6B", stroke_dp=1, radius_dp=16))
+            else:
+                btn.setTextColor(_c(COLOR_TEXT_PR))
+                btn.setBackground(self._bg_rounded(self._accent() if selected else "#08FFFFFF", radius_dp=16))
             
             def make_on_select(v_val):
                 def _click(_v):
@@ -1903,8 +1957,13 @@ class Plugin(BasePlugin):
                     def _long(_v):
                         self._bounce_anim(_v)
                         try:
-                            on_long_select(v_val)
-                            self._close_source_picker_screen(animated=True)
+                            is_now_excluded = bool(on_long_select(v_val))
+                            if is_now_excluded:
+                                _v.setTextColor(_c("#FFFF6B6B"))
+                                _v.setBackground(self._bg_rounded("#22FF6B6B", "#66FF6B6B", stroke_dp=1, radius_dp=16))
+                            else:
+                                _v.setTextColor(_c(COLOR_TEXT_PR))
+                                _v.setBackground(self._bg_rounded("#08FFFFFF", radius_dp=16))
                             return True
                         except Exception:
                             return False
@@ -1932,13 +1991,13 @@ class Plugin(BasePlugin):
         vals = self._source_filter_options()
         options = [("", _tr("Все источники", "All sources"))] + [(x, x) for x in vals if x]
         cur = self._source_filter if self._source_filter in vals else ""
-        self._open_picker_screen(_tr("Выбор источника", "Select source"), options, cur, self._set_source_filter, self._set_source_exclude_filter)
+        self._open_picker_screen(_tr("Выбор источника", "Select source"), options, cur, self._set_source_filter, self._set_source_exclude_filter, self._source_exclude_filters)
 
     def _open_category_picker_screen(self):
         vals = self._category_filter_options()
         options = [("", _tr("Все категории", "All categories"))] + [(x, x) for x in vals if x]
         cur = self._category_filter if self._category_filter in vals else ""
-        self._open_picker_screen(_tr("Выбор категории", "Select category"), options, cur, self._set_category_filter, self._set_category_exclude_filter)
+        self._open_picker_screen(_tr("Выбор категории", "Select category"), options, cur, self._set_category_filter, self._set_category_exclude_filter, self._category_exclude_filters)
 
     def _close_source_picker_screen(self, animated: bool):
         overlay = self._src_overlay
@@ -3075,9 +3134,9 @@ class Plugin(BasePlugin):
             if self._category_filter:
                 filt = self._category_filter
                 items = [it for it in all_items if _norm_category(it.get("category", "")) == filt]
-            elif self._category_exclude_filter:
-                excl = self._category_exclude_filter
-                items = [it for it in all_items if _norm_category(it.get("category", "")) != excl]
+            elif self._category_exclude_filters:
+                excl_set = set(self._category_exclude_filters)
+                items = [it for it in all_items if _norm_category(it.get("category", "")) not in excl_set]
         else:
             if self._source_filter:
                 filt = self._source_filter
@@ -3086,13 +3145,13 @@ class Plugin(BasePlugin):
                     src_val = _format_source_line(it).strip()
                     if not src_val: src_val = str(it.get("source", "") or "").strip()
                     if src_val == filt: items.append(it)
-            elif self._source_exclude_filter:
-                excl = self._source_exclude_filter
+            elif self._source_exclude_filters:
+                excl_set = set(self._source_exclude_filters)
                 items = []
                 for it in all_items:
                     src_val = _format_source_line(it).strip()
                     if not src_val: src_val = str(it.get("source", "") or "").strip()
-                    if src_val != excl: items.append(it)
+                    if src_val not in excl_set: items.append(it)
 
         if not items:
             t = TextView(ctx)
@@ -3104,7 +3163,7 @@ class Plugin(BasePlugin):
 
         if by_category:
             info = TextView(ctx)
-            info.setText((_tr("Категория", "Category") + f": {self._category_filter}") if self._category_filter else ((_tr("Исключая", "Excluding") + f": #{self._category_exclude_filter}") if self._category_exclude_filter else (_tr("Все категории", "All categories"))))
+            info.setText((_tr("Категория", "Category") + f": {self._category_filter}") if self._category_filter else (_tr("Все категории", "All categories")))
             info.setTextSize(14); info.setTypeface(None, Typeface.BOLD); info.setTextColor(_c(self._accent()))
             info.setPadding(_dp(4), 0, 0, _dp(16))
             self._list_container.addView(info)
