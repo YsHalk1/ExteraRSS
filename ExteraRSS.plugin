@@ -1108,6 +1108,9 @@ class Plugin(BasePlugin):
         self._suppress_open_refresh_once = False
         self._bg_thread_running = False
         self._unread_new_posts = max(0, int(self.get_setting("rss_unread_new", "0") or 0))
+        self._img_preview_mode = str(self.get_setting("feed_img_preview_mode", "compact") or "compact").strip().lower()
+        if self._img_preview_mode not in ("compact", "full"):
+            self._img_preview_mode = "compact"
         self._refresh_fade_token = 0
         self._bg_minutes_seek_listener = None
 
@@ -1243,6 +1246,30 @@ class Plugin(BasePlugin):
             try: self.set_setting("ui_pad", str(int(val)))
             except Exception: pass
 
+    def _set_img_preview_mode(self, mode: Any, persist: bool = True):
+        m = str(mode or "compact").strip().lower()
+        if m not in ("compact", "full"):
+            m = "compact"
+        self._img_preview_mode = m
+        if persist:
+            try: self.set_setting("feed_img_preview_mode", m)
+            except Exception: pass
+
+    def _apply_img_preview_mode_and_reopen(self, mode: str):
+        m = str(mode or "compact").strip().lower()
+        if m not in ("compact", "full"):
+            m = "compact"
+        if m == self._img_preview_mode: return
+        self._set_img_preview_mode(m, persist=True)
+        if self._overlay is None: return
+        mode_now = self._mode
+        fragment = get_last_fragment()
+        self._suppress_open_refresh_once = True
+        self._close(animated=False)
+        if fragment:
+            self._open(fragment)
+            if mode_now != "feed": self._set_mode(mode_now)
+
     def _set_corner_scale(self, value: Any, persist: bool = True):
         val = _clamp_corner_scale(value)
         self._corner_scale = float(val)
@@ -1267,6 +1294,9 @@ class Plugin(BasePlugin):
         try: raw_pad = self.get_setting("ui_pad", str(int(self._ui_pad)))
         except Exception: raw_pad = self._ui_pad
         self._set_ui_pad(raw_pad, persist=False)
+        try: raw_mode = self.get_setting("feed_img_preview_mode", self._img_preview_mode)
+        except Exception: raw_mode = self._img_preview_mode
+        self._set_img_preview_mode(raw_mode, persist=False)
         try: raw_corner = self.get_setting("ui_corner_scale", f"{self._corner_scale:.2f}")
         except Exception: raw_corner = self._corner_scale
         self._set_corner_scale(raw_corner, persist=False)
@@ -3069,11 +3099,17 @@ class Plugin(BasePlugin):
                 iv = ImageView(ctx)
                 iv.setVisibility(View.GONE)
                 iv.setAdjustViewBounds(True)
-                try: iv.setScaleType(ImageView.ScaleType.CENTER_CROP)
-                except Exception: pass
+                preview_mode = str(self._img_preview_mode or "compact")
+                if preview_mode == "full":
+                    try: iv.setScaleType(ImageView.ScaleType.FIT_CENTER)
+                    except Exception: pass
+                    ilp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                else:
+                    try: iv.setScaleType(ImageView.ScaleType.CENTER_CROP)
+                    except Exception: pass
+                    ilp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, _dp(240))
                 # Нет закруглений, так как card делает clip!
                 iv.setBackgroundColor(_c("#00000000")) 
-                ilp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, _dp(240))
                 card.addView(iv, ilp)
                 self._attach_feed_swipe_touch(iv)
                 self._load_image_into(img, iv, quick_preview=True)
@@ -3143,6 +3179,35 @@ class Plugin(BasePlugin):
         hint.setTextColor(_c(COLOR_TEXT_SEC))
         hint.setPadding(_dp(4), 0, 0, _dp(8))
         self._list_container.addView(hint)
+
+        img_hint = TextView(ctx)
+        img_hint.setText(_tr("Размер предпросмотра изображений в ленте", "Feed image preview size"))
+        img_hint.setTextSize(14)
+        img_hint.setTextColor(_c(COLOR_TEXT_SEC))
+        img_hint.setPadding(_dp(4), _dp(8), 0, _dp(8))
+        self._list_container.addView(img_hint)
+
+        img_row = LinearLayout(ctx)
+        img_row.setOrientation(LinearLayout.HORIZONTAL)
+        img_row.setGravity(Gravity.CENTER_VERTICAL)
+        lp_img_row = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp_img_row.bottomMargin = _dp(16)
+        self._list_container.addView(img_row, lp_img_row)
+
+        compact_btn = self._top_button(ctx, _tr("Компактно", "Compact"), lambda: self._apply_img_preview_mode_and_reopen("compact"))
+        full_btn = self._top_button(ctx, _tr("Полностью", "Full"), lambda: self._apply_img_preview_mode_and_reopen("full"))
+        compact_active = (self._img_preview_mode == "compact")
+        full_active = (self._img_preview_mode == "full")
+        compact_btn.setBackground(self._bg_rounded(self._accent() if compact_active else "#14FFFFFF", radius_dp=16))
+        full_btn.setBackground(self._bg_rounded(self._accent() if full_active else "#14FFFFFF", radius_dp=16))
+        try: compact_btn.setAlpha(1.0 if compact_active else 0.85)
+        except Exception: pass
+        try: full_btn.setAlpha(1.0 if full_active else 0.85)
+        except Exception: pass
+
+        img_row.addView(compact_btn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
+        img_row.addView(self._spacer_h(ctx, 10))
+        img_row.addView(full_btn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
 
         card = LinearLayout(ctx)
         card.setOrientation(LinearLayout.VERTICAL)
