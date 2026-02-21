@@ -1355,13 +1355,27 @@ class Plugin(BasePlugin):
 
     # ---------- bg worker ----------
     def _bg_worker(self):
+        warmup = 20
         while self._bg_thread_running:
-            for _ in range(60 * 15):
+            step = warmup
+            warmup = 0
+            if step <= 0:
+                try:
+                    mins = int(self.get_setting("bg_refresh_minutes", "3") or 3)
+                except Exception:
+                    mins = 3
+                if mins < 1: mins = 1
+                if mins > 30: mins = 30
+                step = mins * 60
+            for _ in range(step):
                 if not self._bg_thread_running: return
                 time.sleep(1)
-            if not self.get_setting("auto_refresh", True): continue
-            try: self._silent_refresh_check()
-            except Exception as e: log(f"[RSS] bg worker error: {e}")
+            if not self.get_setting("auto_refresh", True):
+                continue
+            try:
+                self._silent_refresh_check()
+            except Exception as e:
+                log(f"[RSS] bg worker error: {e}")
 
     def _silent_refresh_check(self):
         old_cache = self._get_cache()
@@ -1399,6 +1413,7 @@ class Plugin(BasePlugin):
             Text(text=_tr("Очистить кэш", "Clear cache"), icon="msg_delete", accent=False, on_click=lambda v: self._clear_cache()),
             Divider(),
             Switch(key="auto_refresh", text=_tr("Автообновление (и уведомления в фоне)", "Auto-refresh (and background notifications)"), default=True, icon="msg_autodelete"),
+            Text(text=_tr("Фон-проверка: ~каждые 3 мин", "Background check: ~every 3 min"), icon="msg_clock", accent=False),
         ]
 
     # ---------- drawer ----------
@@ -1926,6 +1941,14 @@ class Plugin(BasePlugin):
         b.setOnClickListener(OnClickListener(on_click))
         return b
 
+    def _attach_feed_swipe_touch(self, v: Optional[View]):
+        if v is None: return
+        try:
+            if self._feed_item_touch_listener is not None:
+                v.setOnTouchListener(self._feed_item_touch_listener)
+        except Exception:
+            pass
+
     def _mode_order(self) -> List[str]:
         return ["feed", "cats", "subs", "settings"]
 
@@ -2180,7 +2203,7 @@ class Plugin(BasePlugin):
         prev_idx = self._mode_index(self._mode)
         self._mode = mode
         new_idx = self._mode_index(mode)
-        self._animate_list_once = False
+        self._animate_list_once = True
         self._update_source_button()
         self._update_bottom_nav_state()
         container = self._list_container
@@ -2864,10 +2887,7 @@ class Plugin(BasePlugin):
                 except Exception: pass
 
             card.setOnClickListener(OnClickListener(on_card_click))
-            try:
-                if self._feed_item_touch_listener is not None:
-                    card.setOnTouchListener(self._feed_item_touch_listener)
-            except Exception: pass
+            self._attach_feed_swipe_touch(card)
 
             if self._animate_list_once and idx < 10:
                 self._animate_entry(card, idx)
@@ -2877,6 +2897,7 @@ class Plugin(BasePlugin):
             header.setOrientation(LinearLayout.VERTICAL)
             header.setPadding(_dp(16), _dp(16), _dp(16), _dp(12))
             card.addView(header)
+            self._attach_feed_swipe_touch(header)
 
             tv_src = TextView(ctx)
             tv_src.setText(src)
@@ -2909,6 +2930,7 @@ class Plugin(BasePlugin):
                 iv.setBackgroundColor(_c("#00000000")) 
                 ilp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, _dp(240))
                 card.addView(iv, ilp)
+                self._attach_feed_swipe_touch(iv)
                 self._load_image_into(img, iv, quick_preview=True)
 
             # CONTENT (Title, text, replies)
@@ -2916,6 +2938,7 @@ class Plugin(BasePlugin):
             content_box.setOrientation(LinearLayout.VERTICAL)
             content_box.setPadding(_dp(16), _dp(12), _dp(16), _dp(16))
             card.addView(content_box)
+            self._attach_feed_swipe_touch(content_box)
 
             if len(images) > 1:
                 tv_more = TextView(ctx)
@@ -2946,6 +2969,7 @@ class Plugin(BasePlugin):
                 tv_title.setTextColor(_c("#FF5555" if veryimportant else COLOR_TEXT_PR))
                 tv_title.setPadding(0, 0, 0, _dp(6) if text else 0)
                 content_box.addView(tv_title)
+                self._attach_feed_swipe_touch(tv_title)
 
             prev = _preview_text(text, 180, title)
             if prev:
@@ -2956,6 +2980,7 @@ class Plugin(BasePlugin):
                 try: tv_prev.setLineSpacing(_dp(3), 1.2)
                 except Exception: pass
                 content_box.addView(tv_prev)
+                self._attach_feed_swipe_touch(tv_prev)
 
 
     def _render_settings(self, ctx):
