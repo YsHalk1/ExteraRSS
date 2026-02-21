@@ -185,6 +185,18 @@ def _clamp_ui_pad(v: Any) -> int:
         x = _UI_PAD_MAX
     return x
 
+
+def _clamp_bg_refresh_minutes(v: Any) -> int:
+    try:
+        x = int(round(float(v)))
+    except Exception:
+        x = 3
+    if x < 1:
+        x = 1
+    if x > 30:
+        x = 30
+    return x
+
 def _is_ru_locale() -> bool:
     try:
         if JavaLocale is not None:
@@ -1064,6 +1076,8 @@ class Plugin(BasePlugin):
         self._suppress_open_refresh_once = False
         self._bg_thread_running = False
         self._unread_new_posts = max(0, int(self.get_setting("rss_unread_new", "0") or 0))
+        self._refresh_fade_token = 0
+        self._bg_minutes_seek_listener = None
 
     # ---- Animations Helpers ----
     def _reset_press_state(self, v: Optional[View]):
@@ -1361,11 +1375,9 @@ class Plugin(BasePlugin):
             warmup = 0
             if step <= 0:
                 try:
-                    mins = int(self.get_setting("bg_refresh_minutes", "3") or 3)
+                    mins = _clamp_bg_refresh_minutes(self.get_setting("bg_refresh_minutes", "3"))
                 except Exception:
                     mins = 3
-                if mins < 1: mins = 1
-                if mins > 30: mins = 30
                 step = mins * 60
             for _ in range(step):
                 if not self._bg_thread_running: return
@@ -1594,6 +1606,8 @@ class Plugin(BasePlugin):
 
     def _set_refreshing_ui(self, val: bool):
         self._refreshing = bool(val)
+        self._refresh_fade_token += 1
+        token = int(self._refresh_fade_token)
         try:
             rb = self._refresh_bar
             if rb is None: return
@@ -1602,6 +1616,15 @@ class Plugin(BasePlugin):
                 rb.setAlpha(0.0)
                 rb.setTranslationY(float(_dp(-30)))
                 rb.animate().alpha(1.0).translationY(0.0).setDuration(250).setInterpolator(OvershootInterpolator(1.0)).start()
+                def late_fade():
+                    try:
+                        if int(self._refresh_fade_token) != token: return
+                        if not self._refreshing: return
+                        rb.animate().alpha(0.58).setDuration(260).start()
+                    except Exception:
+                        pass
+                try: AndroidUtilities.runOnUIThread(Runnable(late_fade), 2000)
+                except Exception: pass
             else:
                 anim = rb.animate().alpha(0.0).translationY(float(_dp(-30))).setDuration(200)
                 anim.withEndAction(Runnable(lambda: rb.setVisibility(View.GONE)))
@@ -2188,6 +2211,7 @@ class Plugin(BasePlugin):
             self._ui_seek_listener = None
             self._corner_seek_listener = None
             self._accent_seek_listener = None
+            self._bg_minutes_seek_listener = None
 
         if not animated or content is None: detach(); return
         self._slide_down_exit(overlay, content)
@@ -2659,6 +2683,51 @@ class Plugin(BasePlugin):
         try: iv.setScaleType(ImageView.ScaleType.FIT_CENTER)
         except Exception: pass
         iv.setBackground(self._bg_rounded("#00000000"))
+
+        zoom = {"scale": 1.0, "base_dist": 0.0}
+        def _dist(ev):
+            try:
+                if int(ev.getPointerCount()) < 2: return 0.0
+                dx = float(ev.getX(0) - ev.getX(1))
+                dy = float(ev.getY(0) - ev.getY(1))
+                return (dx * dx + dy * dy) ** 0.5
+            except Exception:
+                return 0.0
+
+        def _on_img_touch(_v, ev):
+            try:
+                act = int(ev.getActionMasked())
+            except Exception:
+                try: act = int(ev.getAction())
+                except Exception: act = -1
+            try:
+                if act == int(MotionEvent.ACTION_POINTER_DOWN):
+                    zoom["base_dist"] = _dist(ev)
+                    return True
+                if act == int(MotionEvent.ACTION_MOVE) and int(ev.getPointerCount()) >= 2:
+                    d = _dist(ev)
+                    bd = float(zoom.get("base_dist", 0.0))
+                    if bd > 0.0 and d > 0.0:
+                        ns = float(zoom.get("scale", 1.0)) * (d / bd)
+                        if ns < 1.0: ns = 1.0
+                        if ns > 4.0: ns = 4.0
+                        zoom["scale"] = ns
+                        zoom["base_dist"] = d
+                        iv.setScaleX(ns)
+                        iv.setScaleY(ns)
+                    return True
+                if act in (int(MotionEvent.ACTION_UP), int(MotionEvent.ACTION_CANCEL)):
+                    zoom["base_dist"] = 0.0
+                    if float(zoom.get("scale", 1.0)) <= 1.02:
+                        zoom["scale"] = 1.0
+                        iv.setScaleX(1.0); iv.setScaleY(1.0)
+                    return False
+            except Exception:
+                return False
+            return False
+
+        try: iv.setOnTouchListener(_OnTouchListener(_on_img_touch))
+        except Exception: pass
         
         ilp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         ilp.topMargin = _dp(16)
@@ -3044,6 +3113,56 @@ class Plugin(BasePlugin):
 
         reset_btn = self._primary_button(ctx, _tr("Сбросить: 100%", "Reset: 100%"), lambda: self._apply_ui_scale_and_reopen(1.0))
         self._list_container.addView(reset_btn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        bg_hint = TextView(ctx)
+        bg_hint.setText(_tr("Интервал автообновления в фоне (мин)", "Background auto-refresh interval (min)"))
+        bg_hint.setTextSize(14)
+        bg_hint.setTextColor(_c(COLOR_TEXT_SEC))
+        bg_hint.setPadding(_dp(4), _dp(20), 0, _dp(8))
+        self._list_container.addView(bg_hint)
+
+        bg_card = LinearLayout(ctx)
+        bg_card.setOrientation(LinearLayout.VERTICAL)
+        bg_card.setPadding(_dp(20), _dp(20), _dp(20), _dp(20))
+        bg_card.setBackground(self._bg_rounded(COLOR_CARD, COLOR_STROKE, stroke_dp=1, radius_dp=CORNER_RADIUS_DP))
+        lp_bg = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp_bg.bottomMargin = _dp(16)
+        self._list_container.addView(bg_card, lp_bg)
+
+        cur_bg = _clamp_bg_refresh_minutes(self.get_setting("bg_refresh_minutes", "3"))
+        bg_tv = TextView(ctx)
+        bg_tv.setText((_tr("Текущее значение", "Current value") + f": {cur_bg} мин"))
+        bg_tv.setTextSize(16)
+        bg_tv.setTextColor(_c(COLOR_TEXT_PR))
+        bg_tv.setTypeface(None, Typeface.BOLD)
+        bg_tv.setPadding(0, 0, 0, _dp(16))
+        bg_card.addView(bg_tv)
+
+        sb_bg = SeekBar(ctx)
+        try:
+            sb_bg.setMax(29)
+            sb_bg.setProgress(max(0, min(29, cur_bg - 1)))
+        except Exception: pass
+        bg_card.addView(sb_bg, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        def on_bg_progress(_sb, progress, from_user):
+            try:
+                if not from_user: return
+                val = max(1, min(30, int(progress) + 1))
+                bg_tv.setText((_tr("Текущее значение", "Current value") + f": {val} мин"))
+            except Exception: pass
+
+        def on_bg_stop(_sb):
+            try:
+                val = max(1, min(30, int(_sb.getProgress() or 0) + 1))
+                self.set_setting("bg_refresh_minutes", str(val))
+                bg_tv.setText((_tr("Текущее значение", "Current value") + f": {val} мин"))
+            except Exception: pass
+
+        try:
+            self._bg_minutes_seek_listener = _OnSeekBarChangeListener(on_bg_progress, None, on_bg_stop)
+            sb_bg.setOnSeekBarChangeListener(self._bg_minutes_seek_listener)
+        except Exception: pass
 
         hint_corner = TextView(ctx)
         hint_corner.setText(_tr("Общее закругление интерфейса", "Global corner roundness"))
