@@ -1090,6 +1090,10 @@ class Plugin(BasePlugin):
         self._mini_overlay: Optional[FrameLayout] = None
         self._mini_link: str = ""
         self._back_tracking_paused = False
+        self._hidden_hotspot: Optional[View] = None
+        self._hotspot_touch_listener = None
+        self._hotspot_touch_token = 0
+        self._hotspot_press_armed = False
 
         self._source_filter: str = ""
         self._category_filter: str = ""
@@ -1461,12 +1465,100 @@ class Plugin(BasePlugin):
             except Exception: pass
         self._install_drawer_item()
 
+    def _is_menu_fragment(self, fragment) -> bool:
+        try:
+            if fragment is None: return False
+            name = str(fragment.getClass().getSimpleName() or "")
+            low = name.lower()
+            if "chat" in low: return False
+            if "dialogs" in low or "launch" in low: return True
+            return True
+        except Exception:
+            return False
+
+    def _install_hidden_hotspot_trigger(self):
+        try:
+            if self._hidden_hotspot is not None:
+                return
+            fragment = get_last_fragment()
+            if not self._is_menu_fragment(fragment):
+                return
+            activity = fragment.getParentActivity()
+            if not activity: return
+            decor = activity.getWindow().getDecorView()
+            if not isinstance(decor, ViewGroup): return
+
+            hotspot = View(activity)
+            lp = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, _dp(56))
+            lp.gravity = int(Gravity.TOP)
+            lp.topMargin = _statusbar_pad()
+            hotspot.setLayoutParams(lp)
+            hotspot.setBackgroundColor(_c("#00000000"))
+            hotspot.setAlpha(0.01)
+            hotspot.setClickable(True)
+            hotspot.setLongClickable(True)
+
+            def on_touch(_v, ev):
+                try:
+                    try: act = int(ev.getActionMasked())
+                    except Exception: act = int(ev.getAction())
+                except Exception:
+                    return False
+                if act == int(MotionEvent.ACTION_DOWN):
+                    self._hotspot_press_armed = True
+                    self._hotspot_touch_token += 1
+                    token = int(self._hotspot_touch_token)
+                    def trigger():
+                        try:
+                            if token != int(self._hotspot_touch_token): return
+                            if not self._hotspot_press_armed: return
+                            frag = get_last_fragment()
+                            if not self._is_menu_fragment(frag): return
+                            self._hotspot_press_armed = False
+                            try: hotspot.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                            except Exception: pass
+                            self._open(frag)
+                        except Exception:
+                            pass
+                    try: AndroidUtilities.runOnUIThread(Runnable(trigger), 500)
+                    except Exception: pass
+                    return True
+                if act in (int(MotionEvent.ACTION_UP), int(MotionEvent.ACTION_CANCEL), int(MotionEvent.ACTION_MOVE)):
+                    if act != int(MotionEvent.ACTION_MOVE):
+                        self._hotspot_press_armed = False
+                    return True
+                return False
+
+            try:
+                self._hotspot_touch_listener = _OnTouchListener(on_touch)
+                hotspot.setOnTouchListener(self._hotspot_touch_listener)
+            except Exception:
+                pass
+
+            decor.addView(hotspot, lp)
+            self._hidden_hotspot = hotspot
+        except Exception:
+            pass
+
+    def _remove_hidden_hotspot_trigger(self):
+        h = self._hidden_hotspot
+        if h is None: return
+        try:
+            p = h.getParent()
+            if p and isinstance(p, ViewGroup): p.removeView(h)
+        except Exception:
+            pass
+        self._hidden_hotspot = None
+        self._hotspot_touch_listener = None
+        self._hotspot_press_armed = False
+
     # ---------- lifecycle ----------
     def on_plugin_load(self):
         self._reload_ui_scale_from_settings()
         try: self._unread_new_posts = max(0, int(self.get_setting("rss_unread_new", "0") or 0))
         except Exception: self._unread_new_posts = 0
         self._install_drawer_item()
+        run_on_ui_thread(self._install_hidden_hotspot_trigger)
         self._bg_thread_running = True
         threading.Thread(target=self._bg_worker, daemon=True).start()
 
@@ -1479,6 +1571,7 @@ class Plugin(BasePlugin):
         run_on_ui_thread(lambda: self._close_post_screen(animated=False))
         run_on_ui_thread(lambda: self._close_image_screen(animated=False))
         run_on_ui_thread(lambda: self._close_mini_overlay(animated=False))
+        run_on_ui_thread(self._remove_hidden_hotspot_trigger)
 
     # ---------- bg worker ----------
     def _bg_worker(self):
@@ -2237,6 +2330,7 @@ class Plugin(BasePlugin):
     # ---------- MAIN SCREEN ----------
     def _open(self, fragment):
         self._reload_ui_scale_from_settings()
+        self._remove_hidden_hotspot_trigger()
         if self._unread_new_posts > 0:
             self._set_unread_count(0, persist=True)
         if self._overlay is not None: return
@@ -2418,6 +2512,7 @@ class Plugin(BasePlugin):
             self._corner_seek_listener = None
             self._accent_seek_listener = None
             self._bg_minutes_seek_listener = None
+            run_on_ui_thread(self._install_hidden_hotspot_trigger)
 
         if not animated or content is None: detach(); return
         self._slide_down_exit(overlay, content)
