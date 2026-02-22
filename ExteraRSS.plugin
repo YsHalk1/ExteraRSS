@@ -1156,8 +1156,7 @@ class Plugin(BasePlugin):
         self._bg_thread_running = False
         self._unread_new_posts = max(0, int(self.get_setting("rss_unread_new", "0") or 0))
         self._img_preview_mode = str(self.get_setting("feed_img_preview_mode", "compact") or "compact").strip().lower()
-        self._feed_img_layout_mode = str(self.get_setting("feed_img_layout_mode", "primary") or "primary").strip().lower()
-        self._post_img_layout_mode = str(self.get_setting("post_img_layout_mode", "primary") or "primary").strip().lower()
+        self._img_layout_mode = str(self.get_setting("img_layout_mode", self.get_setting("feed_img_layout_mode", self.get_setting("post_img_layout_mode", "primary"))) or "primary").strip().lower()
         src_ex_raw = self.get_setting("source_exclude_filters", "")
         if not src_ex_raw:
             src_old = str(self.get_setting("source_exclude_filter", "") or "")
@@ -1178,10 +1177,8 @@ class Plugin(BasePlugin):
         self._sub_exclude_filters = [_norm_sub(x) for x in sub_ex_arr if _norm_sub(x)]
         if self._img_preview_mode not in ("compact", "full"):
             self._img_preview_mode = "compact"
-        if self._feed_img_layout_mode not in ("primary", "grid"):
-            self._feed_img_layout_mode = "primary"
-        if self._post_img_layout_mode not in ("primary", "grid"):
-            self._post_img_layout_mode = "primary"
+        if self._img_layout_mode not in ("primary", "grid"):
+            self._img_layout_mode = "primary"
         self._refresh_fade_token = 0
         self._bg_minutes_seek_listener = None
 
@@ -1326,25 +1323,14 @@ class Plugin(BasePlugin):
             try: self.set_setting("feed_img_preview_mode", m)
             except Exception: pass
 
-    def _set_post_img_layout_mode(self, mode: Any, persist: bool = True):
+    def _set_img_layout_mode(self, mode: Any, persist: bool = True):
         m = str(mode or "primary").strip().lower()
         if m not in ("primary", "grid"):
             m = "primary"
-        self._post_img_layout_mode = m
+        self._img_layout_mode = m
         if persist:
             try:
-                self.set_setting("post_img_layout_mode", m)
-            except Exception:
-                pass
-
-    def _set_feed_img_layout_mode(self, mode: Any, persist: bool = True):
-        m = str(mode or "primary").strip().lower()
-        if m not in ("primary", "grid"):
-            m = "primary"
-        self._feed_img_layout_mode = m
-        if persist:
-            try:
-                self.set_setting("feed_img_layout_mode", m)
+                self.set_setting("img_layout_mode", m)
             except Exception:
                 pass
 
@@ -1363,31 +1349,13 @@ class Plugin(BasePlugin):
             self._open(fragment)
             if mode_now != "feed": self._set_mode(mode_now)
 
-    def _apply_post_img_layout_mode_and_reopen(self, mode: str):
+    def _apply_img_layout_mode_and_reopen(self, mode: str):
         m = str(mode or "primary").strip().lower()
         if m not in ("primary", "grid"):
             m = "primary"
-        if m == self._post_img_layout_mode:
+        if m == self._img_layout_mode:
             return
-        self._set_post_img_layout_mode(m, persist=True)
-        if self._overlay is None:
-            return
-        mode_now = self._mode
-        fragment = get_last_fragment()
-        self._suppress_open_refresh_once = True
-        self._close(animated=False)
-        if fragment:
-            self._open(fragment)
-            if mode_now != "feed":
-                self._set_mode(mode_now)
-
-    def _apply_feed_img_layout_mode_and_reopen(self, mode: str):
-        m = str(mode or "primary").strip().lower()
-        if m not in ("primary", "grid"):
-            m = "primary"
-        if m == self._feed_img_layout_mode:
-            return
-        self._set_feed_img_layout_mode(m, persist=True)
+        self._set_img_layout_mode(m, persist=True)
         if self._overlay is None:
             return
         mode_now = self._mode
@@ -1426,12 +1394,9 @@ class Plugin(BasePlugin):
         try: raw_mode = self.get_setting("feed_img_preview_mode", self._img_preview_mode)
         except Exception: raw_mode = self._img_preview_mode
         self._set_img_preview_mode(raw_mode, persist=False)
-        try: raw_feed_layout = self.get_setting("feed_img_layout_mode", self._feed_img_layout_mode)
-        except Exception: raw_feed_layout = self._feed_img_layout_mode
-        self._set_feed_img_layout_mode(raw_feed_layout, persist=False)
-        try: raw_post_mode = self.get_setting("post_img_layout_mode", self._post_img_layout_mode)
-        except Exception: raw_post_mode = self._post_img_layout_mode
-        self._set_post_img_layout_mode(raw_post_mode, persist=False)
+        try: raw_layout = self.get_setting("img_layout_mode", self._img_layout_mode)
+        except Exception: raw_layout = self._img_layout_mode
+        self._set_img_layout_mode(raw_layout, persist=False)
         try:
             src_ex_raw = self.get_setting("source_exclude_filters", "")
             if src_ex_raw:
@@ -3300,15 +3265,23 @@ class Plugin(BasePlugin):
 
         # Edge-to-edge style images inside the padded col by giving negative margin? No, just round them
         loading_images_tv = None
+        loading_images_pb = None
         if len(images) > 1:
+            loading_row = LinearLayout(activity)
+            loading_row.setOrientation(LinearLayout.HORIZONTAL)
+            loading_row.setGravity(Gravity.CENTER_VERTICAL)
+            loading_row.setPadding(0, 0, 0, _dp(10))
+            loading_images_pb = ProgressBar(activity)
+            loading_row.addView(loading_images_pb, LinearLayout.LayoutParams(_dp(16), _dp(16)))
             loading_images_tv = TextView(activity)
             loading_images_tv.setText(_tr("Загрузка изображений…", "Loading images…"))
             loading_images_tv.setTextSize(13)
             loading_images_tv.setTextColor(_c(COLOR_TEXT_SEC))
-            loading_images_tv.setPadding(0, 0, 0, _dp(10))
-            col.addView(loading_images_tv)
+            loading_images_tv.setPadding(_dp(8), 0, 0, 0)
+            loading_row.addView(loading_images_tv)
+            col.addView(loading_row)
 
-        post_mode = str(self._post_img_layout_mode or "primary")
+        post_mode = str(self._img_layout_mode or "primary")
         if post_mode == "grid" and len(images) > 1:
             grid = LinearLayout(activity)
             grid.setOrientation(LinearLayout.VERTICAL)
@@ -3345,7 +3318,7 @@ class Plugin(BasePlugin):
                 else:
                     lp_iv.leftMargin = _dp(6)
                 row.addView(iv, lp_iv)
-                self._load_image_into(img_url, iv, quick_preview=True, loading_label=loading_images_tv)
+                self._load_image_into(img_url, iv, quick_preview=True, loading_label=loading_images_tv, loading_spinner=loading_images_pb)
             if len(images) % 2 == 1 and row is not None:
                 spacer = View(activity)
                 row.addView(spacer, LinearLayout.LayoutParams(0, _dp(220), 1.0))
@@ -3370,7 +3343,7 @@ class Plugin(BasePlugin):
                 ilp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, _dp(500))
                 ilp.bottomMargin = _dp(12 if img_idx < len(images) - 1 else 24)
                 col.addView(iv, ilp)
-                self._load_image_into(img_url, iv, quick_preview=True, loading_label=loading_images_tv)
+                self._load_image_into(img_url, iv, quick_preview=True, loading_label=loading_images_tv, loading_spinner=loading_images_pb)
 
         if body:
             tv_body = TextView(activity)
@@ -3665,7 +3638,7 @@ class Plugin(BasePlugin):
         except Exception: run_on_ui_thread(detach)
 
     # ---------- image loading ----------
-    def _load_image_into(self, url: str, iv: ImageView, quick_preview: bool = False, loading_label: Optional[TextView] = None):
+    def _load_image_into(self, url: str, iv: ImageView, quick_preview: bool = False, loading_label: Optional[TextView] = None, loading_spinner: Optional[View] = None):
         url = _upgrade_image_url(url)
         if not url: return
 
@@ -3690,6 +3663,22 @@ class Plugin(BasePlugin):
                     pass
             run_on_ui_thread(_tick)
 
+        def _set_loading_visible(vis: bool):
+            if loading_label is not None:
+                try:
+                    row = getattr(loading_label, "_rss_loading_row", None)
+                    if row is not None:
+                        row.setVisibility(View.VISIBLE if vis else View.GONE)
+                    else:
+                        loading_label.setVisibility(View.VISIBLE if vis else View.GONE)
+                except Exception:
+                    pass
+            if loading_spinner is not None:
+                try:
+                    loading_spinner.setVisibility(View.VISIBLE if vis else View.GONE)
+                except Exception:
+                    pass
+
         with self._img_cache_lock: bmp = self._img_cache.get(url)
         if bmp is not None:
             try: iv.setImageBitmap(bmp); iv.setVisibility(View.VISIBLE)
@@ -3697,7 +3686,7 @@ class Plugin(BasePlugin):
             if loading_label is not None:
                 try:
                     loading_label.setAlpha(1.0)
-                    loading_label.setVisibility(View.GONE)
+                    _set_loading_visible(False)
                 except Exception: pass
             try:
                 iv.setAlpha(1.0)
@@ -3709,7 +3698,7 @@ class Plugin(BasePlugin):
             try:
                 loading_label.setText(_tr("Загрузка превью…", "Loading preview…"))
                 loading_label.setAlpha(1.0)
-                loading_label.setVisibility(View.VISIBLE)
+                _set_loading_visible(True)
             except Exception:
                 pass
             start_loading_pulse(loading_label)
@@ -3784,7 +3773,7 @@ class Plugin(BasePlugin):
                     if loading_label is not None:
                         try:
                             loading_label.setAlpha(1.0)
-                            loading_label.setVisibility(View.GONE)
+                            _set_loading_visible(False)
                         except Exception: pass
                 run_on_ui_thread(ui)
             except Exception:
@@ -3943,17 +3932,26 @@ class Plugin(BasePlugin):
 
             # IMAGE (Edge to Edge)
             loading_img_tv = None
+            loading_img_pb = None
             if images:
+                loading_row = LinearLayout(ctx)
+                loading_row.setOrientation(LinearLayout.HORIZONTAL)
+                loading_row.setGravity(Gravity.CENTER_VERTICAL)
+                loading_row.setPadding(_dp(16), 0, _dp(16), _dp(8))
+                loading_img_pb = ProgressBar(ctx)
+                loading_row.addView(loading_img_pb, LinearLayout.LayoutParams(_dp(14), _dp(14)))
                 loading_img_tv = TextView(ctx)
                 loading_img_tv.setText(_tr("Загрузка превью…", "Loading preview…"))
                 loading_img_tv.setTextSize(12)
                 loading_img_tv.setTextColor(_c(COLOR_TEXT_SEC))
-                loading_img_tv.setPadding(_dp(16), 0, _dp(16), _dp(8))
-                try: loading_img_tv.setVisibility(View.GONE)
+                loading_img_tv.setPadding(_dp(8), 0, 0, 0)
+                loading_row.addView(loading_img_tv)
+                try: loading_row.setVisibility(View.GONE)
                 except Exception: pass
-                card.addView(loading_img_tv)
+                card.addView(loading_row)
+                loading_img_tv._rss_loading_row = loading_row
 
-            feed_img_mode = str(self._feed_img_layout_mode or "primary")
+            feed_img_mode = str(self._img_layout_mode or "primary")
             if images and feed_img_mode == "grid" and len(images) > 1:
                 grid = LinearLayout(ctx)
                 grid.setOrientation(LinearLayout.VERTICAL)
@@ -3994,7 +3992,7 @@ class Plugin(BasePlugin):
                         lp_iv.leftMargin = _dp(6)
                     row.addView(iv, lp_iv)
                     self._attach_feed_swipe_touch(iv)
-                    self._load_image_into(img_url, iv, quick_preview=True, loading_label=loading_img_tv)
+                    self._load_image_into(img_url, iv, quick_preview=True, loading_label=loading_img_tv, loading_spinner=loading_img_pb)
                 if len(images) % 2 == 1 and row is not None:
                     spacer = View(ctx)
                     row.addView(spacer, LinearLayout.LayoutParams(0, cell_h, 1.0))
@@ -4015,7 +4013,7 @@ class Plugin(BasePlugin):
                 iv.setBackgroundColor(_c("#00000000")) 
                 card.addView(iv, ilp)
                 self._attach_feed_swipe_touch(iv)
-                self._load_image_into(img, iv, quick_preview=True, loading_label=loading_img_tv)
+                self._load_image_into(img, iv, quick_preview=True, loading_label=loading_img_tv, loading_spinner=loading_img_pb)
 
             # CONTENT (Title, text, replies)
             content_box = LinearLayout(ctx)
@@ -4113,7 +4111,7 @@ class Plugin(BasePlugin):
         img_row.addView(full_btn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
 
         feed_layout_hint = TextView(ctx)
-        feed_layout_hint.setText(_tr("Отображение изображений в ленте", "Feed images display"))
+        feed_layout_hint.setText(_tr("Отображение изображений (лента и пост)", "Images display (feed and post)"))
         feed_layout_hint.setTextSize(14)
         feed_layout_hint.setTextColor(_c(COLOR_TEXT_SEC))
         feed_layout_hint.setPadding(_dp(4), 0, 0, _dp(8))
@@ -4126,10 +4124,10 @@ class Plugin(BasePlugin):
         lp_feed_layout_row.bottomMargin = _dp(16)
         self._list_container.addView(feed_layout_row, lp_feed_layout_row)
 
-        feed_primary_btn = self._top_button(ctx, _tr("Основное", "Primary"), lambda: self._apply_feed_img_layout_mode_and_reopen("primary"))
-        feed_grid_btn = self._top_button(ctx, _tr("Сетка (все)", "Grid (all)"), lambda: self._apply_feed_img_layout_mode_and_reopen("grid"))
-        feed_primary_active = (self._feed_img_layout_mode == "primary")
-        feed_grid_active = (self._feed_img_layout_mode == "grid")
+        feed_primary_btn = self._top_button(ctx, _tr("Основное", "Primary"), lambda: self._apply_img_layout_mode_and_reopen("primary"))
+        feed_grid_btn = self._top_button(ctx, _tr("Сетка (все)", "Grid (all)"), lambda: self._apply_img_layout_mode_and_reopen("grid"))
+        feed_primary_active = (self._img_layout_mode == "primary")
+        feed_grid_active = (self._img_layout_mode == "grid")
         feed_primary_btn.setBackground(self._bg_rounded(self._accent() if feed_primary_active else "#14FFFFFF", radius_dp=16))
         feed_grid_btn.setBackground(self._bg_rounded(self._accent() if feed_grid_active else "#14FFFFFF", radius_dp=16))
         try: feed_primary_btn.setAlpha(1.0 if feed_primary_active else 0.85)
@@ -4141,34 +4139,7 @@ class Plugin(BasePlugin):
         feed_layout_row.addView(self._spacer_h(ctx, 10))
         feed_layout_row.addView(feed_grid_btn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
 
-        post_img_hint = TextView(ctx)
-        post_img_hint.setText(_tr("Отображение изображений в посте", "Post images display"))
-        post_img_hint.setTextSize(14)
-        post_img_hint.setTextColor(_c(COLOR_TEXT_SEC))
-        post_img_hint.setPadding(_dp(4), 0, 0, _dp(8))
-        self._list_container.addView(post_img_hint)
-
-        post_img_row = LinearLayout(ctx)
-        post_img_row.setOrientation(LinearLayout.HORIZONTAL)
-        post_img_row.setGravity(Gravity.CENTER_VERTICAL)
-        lp_post_img_row = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        lp_post_img_row.bottomMargin = _dp(16)
-        self._list_container.addView(post_img_row, lp_post_img_row)
-
-        primary_btn = self._top_button(ctx, _tr("Основное", "Primary"), lambda: self._apply_post_img_layout_mode_and_reopen("primary"))
-        grid_btn = self._top_button(ctx, _tr("Сетка (все)", "Grid (all)"), lambda: self._apply_post_img_layout_mode_and_reopen("grid"))
-        primary_active = (self._post_img_layout_mode == "primary")
-        grid_active = (self._post_img_layout_mode == "grid")
-        primary_btn.setBackground(self._bg_rounded(self._accent() if primary_active else "#14FFFFFF", radius_dp=16))
-        grid_btn.setBackground(self._bg_rounded(self._accent() if grid_active else "#14FFFFFF", radius_dp=16))
-        try: primary_btn.setAlpha(1.0 if primary_active else 0.85)
-        except Exception: pass
-        try: grid_btn.setAlpha(1.0 if grid_active else 0.85)
-        except Exception: pass
-
-        post_img_row.addView(primary_btn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
-        post_img_row.addView(self._spacer_h(ctx, 10))
-        post_img_row.addView(grid_btn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
+        # unified image layout selector already controls both feed and post
 
         hist_hint = TextView(ctx)
         hist_hint.setText(_tr("Количество постов в истории", "Posts history count"))
