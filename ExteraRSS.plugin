@@ -3083,9 +3083,9 @@ class Plugin(BasePlugin):
 
             iv.setClickable(True)
             u = img_url
-            def on_img_click(_v, uu=u):
+            def on_img_click(_v, uu=u, all_images=images, idx=img_idx):
                 self._bounce_anim(_v)
-                try: self._open_image_screen(get_last_fragment(), uu)
+                try: self._open_image_screen(get_last_fragment(), uu, all_images, idx)
                 except Exception: pass
             iv.setOnClickListener(OnClickListener(on_img_click))
 
@@ -3126,7 +3126,7 @@ class Plugin(BasePlugin):
         except Exception: run_on_ui_thread(detach)
 
     # ---------- Image fullscreen screen ----------
-    def _open_image_screen(self, fragment, url: str):
+    def _open_image_screen(self, fragment, url: str, images: Optional[List[str]] = None, start_index: int = 0):
         if not url: return
         if self._img_overlay is not None: return
         if not fragment: fragment = get_last_fragment()
@@ -3164,14 +3164,29 @@ class Plugin(BasePlugin):
         zoom_row.setPadding(0, _dp(8), 0, _dp(4))
         content.addView(zoom_row)
 
+        image_list = _norm_images_list(images or [])
+        if not image_list:
+            image_list = [_upgrade_image_url(url)]
+        if not image_list:
+            image_list = [url]
+        idx = int(start_index)
+        if idx < 0: idx = 0
+        if idx >= len(image_list): idx = len(image_list) - 1
+        state = {"idx": idx}
+
         zoom_out_btn = self._top_button(activity, " − ", lambda: None)
         zoom_in_btn = self._top_button(activity, " + ", lambda: None)
         zoom_reset_btn = self._top_button(activity, _tr("100%", "100%"), lambda: None)
+        image_pos_tv = TextView(activity)
+        image_pos_tv.setTextColor(_c(COLOR_TEXT_SEC))
+        image_pos_tv.setTextSize(13)
         zoom_row.addView(zoom_out_btn)
         zoom_row.addView(self._spacer_h(activity, 8))
         zoom_row.addView(zoom_reset_btn)
         zoom_row.addView(self._spacer_h(activity, 8))
         zoom_row.addView(zoom_in_btn)
+        zoom_row.addView(self._spacer_h(activity, 10))
+        zoom_row.addView(image_pos_tv)
 
         iv = ImageView(activity)
         iv.setVisibility(View.GONE)
@@ -3180,7 +3195,61 @@ class Plugin(BasePlugin):
         except Exception: pass
         iv.setBackground(self._bg_rounded("#00000000"))
 
-        zoom = {"scale": 1.0, "base_dist": 0.0}
+        zoom = {"scale": 1.0, "base_dist": 0.0, "tx": 0.0, "ty": 0.0, "pan_x": 0.0, "pan_y": 0.0, "swipe_x": 0.0, "swipe_y": 0.0}
+
+        def _max_pan_x_for(scale: float) -> float:
+            try:
+                vw = float(iv.getWidth())
+                if vw <= 0.0: vw = float(iv.getMeasuredWidth())
+            except Exception:
+                vw = 0.0
+            return max(0.0, (vw * (max(1.0, scale) - 1.0)) / 2.0)
+
+        def _max_pan_y_for(scale: float) -> float:
+            try:
+                vh = float(iv.getHeight())
+                if vh <= 0.0: vh = float(iv.getMeasuredHeight())
+            except Exception:
+                vh = 0.0
+            return max(0.0, (vh * (max(1.0, scale) - 1.0)) / 2.0)
+
+        def _apply_pan(tx: float, ty: float):
+            sc = float(zoom.get("scale", 1.0))
+            if sc <= 1.0:
+                tx = 0.0
+                ty = 0.0
+            mx = _max_pan_x_for(sc)
+            my = _max_pan_y_for(sc)
+            if tx > mx: tx = mx
+            if tx < -mx: tx = -mx
+            if ty > my: ty = my
+            if ty < -my: ty = -my
+            zoom["tx"] = float(tx)
+            zoom["ty"] = float(ty)
+            try:
+                iv.setTranslationX(float(tx))
+                iv.setTranslationY(float(ty))
+            except Exception:
+                pass
+
+        def _apply_image_by_index(new_idx: int):
+            if new_idx < 0 or new_idx >= len(image_list):
+                return
+            state["idx"] = int(new_idx)
+            try:
+                image_pos_tv.setText(f"{int(state['idx']) + 1}/{len(image_list)}")
+            except Exception:
+                pass
+            _apply_zoom(1.0)
+            _apply_pan(0.0, 0.0)
+            self._load_image_into(image_list[int(state["idx"])], iv)
+
+        def _shift_image(delta: int):
+            ni = int(state.get("idx", 0)) + int(delta)
+            if ni < 0 or ni >= len(image_list):
+                return
+            _apply_image_by_index(ni)
+
         def _apply_zoom(ns: float):
             if ns < 1.0: ns = 1.0
             if ns > 4.0: ns = 4.0
@@ -3190,6 +3259,10 @@ class Plugin(BasePlugin):
                 iv.setScaleY(ns)
             except Exception:
                 pass
+            if ns <= 1.0:
+                _apply_pan(0.0, 0.0)
+            else:
+                _apply_pan(float(zoom.get("tx", 0.0)), float(zoom.get("ty", 0.0)))
 
         def _dist(ev):
             try:
@@ -3216,6 +3289,11 @@ class Plugin(BasePlugin):
                         pass
                 if act in (int(MotionEvent.ACTION_POINTER_DOWN), int(MotionEvent.ACTION_DOWN)) and pcount >= 2:
                     zoom["base_dist"] = _dist(ev)
+                    try:
+                        zoom["pan_x"] = float(ev.getRawX())
+                        zoom["pan_y"] = float(ev.getRawY())
+                    except Exception:
+                        pass
                     return True
                 if act == int(MotionEvent.ACTION_MOVE) and pcount >= 2:
                     d = _dist(ev)
@@ -3224,7 +3302,45 @@ class Plugin(BasePlugin):
                         _apply_zoom(float(zoom.get("scale", 1.0)) * (d / bd))
                         zoom["base_dist"] = d
                     return True
+                if pcount == 1 and act == int(MotionEvent.ACTION_DOWN):
+                    try:
+                        zoom["pan_x"] = float(ev.getRawX())
+                        zoom["pan_y"] = float(ev.getRawY())
+                        zoom["swipe_x"] = float(ev.getRawX())
+                        zoom["swipe_y"] = float(ev.getRawY())
+                    except Exception:
+                        pass
+                    return bool(float(zoom.get("scale", 1.0)) > 1.0)
+                if pcount == 1 and act == int(MotionEvent.ACTION_MOVE):
+                    sc = float(zoom.get("scale", 1.0))
+                    if sc > 1.0:
+                        try:
+                            rx = float(ev.getRawX())
+                            ry = float(ev.getRawY())
+                            dx = rx - float(zoom.get("pan_x", rx))
+                            dy = ry - float(zoom.get("pan_y", ry))
+                            zoom["pan_x"] = rx
+                            zoom["pan_y"] = ry
+                            _apply_pan(float(zoom.get("tx", 0.0)) + dx, float(zoom.get("ty", 0.0)) + dy)
+                            try:
+                                par = iv.getParent()
+                                if par is not None: par.requestDisallowInterceptTouchEvent(True)
+                            except Exception:
+                                pass
+                            return True
+                        except Exception:
+                            return True
+                    return False
                 if act in (int(MotionEvent.ACTION_POINTER_UP), int(MotionEvent.ACTION_UP), int(MotionEvent.ACTION_CANCEL)):
+                    if pcount <= 1 and act == int(MotionEvent.ACTION_UP) and float(zoom.get("scale", 1.0)) <= 1.01 and len(image_list) > 1:
+                        try:
+                            dx = float(ev.getRawX()) - float(zoom.get("swipe_x", 0.0))
+                            dy = abs(float(ev.getRawY()) - float(zoom.get("swipe_y", 0.0)))
+                            if abs(dx) >= float(_dp(44)) and dy <= float(_dp(72)):
+                                _shift_image(-1 if dx > 0 else 1)
+                                return True
+                        except Exception:
+                            pass
                     zoom["base_dist"] = 0.0
                     if float(zoom.get("scale", 1.0)) <= 1.01:
                         _apply_zoom(1.0)
@@ -3250,7 +3366,7 @@ class Plugin(BasePlugin):
         ilp.topMargin = _dp(16)
         content.addView(iv, ilp)
 
-        self._load_image_into(url, iv)
+        _apply_image_by_index(int(state.get("idx", 0)))
 
         self._img_overlay = overlay
         self._img_content = content
