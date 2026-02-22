@@ -1096,6 +1096,7 @@ class Plugin(BasePlugin):
         self._back_tracking_paused = False
         self._pencil_hook_view: Optional[View] = None
         self._pencil_touch_listener = None
+        self._pencil_long_click_listener = None
         self._pencil_touch_token = 0
         self._pencil_press_armed = False
         self._pencil_down_x = 0.0
@@ -1620,8 +1621,9 @@ class Plugin(BasePlugin):
 
             def on_touch(_v, ev):
                 try:
+                    raw_act = int(ev.getAction())
                     try: act = int(ev.getActionMasked())
-                    except Exception: act = int(ev.getAction())
+                    except Exception: act = raw_act
                 except Exception:
                     return False
                 if act == int(MotionEvent.ACTION_DOWN):
@@ -1667,9 +1669,16 @@ class Plugin(BasePlugin):
                     except Exception:
                         pass
                     return False
-                if act in (int(MotionEvent.ACTION_UP), int(MotionEvent.ACTION_CANCEL)):
+                # На некоторых сборках прилетает ранний CANCEL во время удержания FAB,
+                # поэтому разоружаем только по явному UP (masked/raw).
+                up_codes = {int(MotionEvent.ACTION_UP)}
+                try:
+                    up_codes.add(int(MotionEvent.ACTION_POINTER_UP))
+                except Exception:
+                    pass
+                if act in up_codes or raw_act in up_codes:
                     if self._pencil_press_armed:
-                        log(f"[RSS] pencil hold: disarm action={act}")
+                        log(f"[RSS] pencil hold: disarm up action={act} raw={raw_act}")
                     self._pencil_press_armed = False
                     return False
                 return False
@@ -1677,6 +1686,26 @@ class Plugin(BasePlugin):
             try:
                 self._pencil_touch_listener = _OnTouchListener(on_touch)
                 pencil.setOnTouchListener(self._pencil_touch_listener)
+                def on_long_click(_v):
+                    try:
+                        frag = get_last_fragment()
+                        if not self._is_menu_fragment(frag):
+                            return False
+                        self._pencil_press_armed = False
+                        log("[RSS] pencil hold: native onLongClick fired")
+                        try: pencil.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                        except Exception: pass
+                        self._open(frag)
+                        return True
+                    except Exception as e:
+                        log(f"[RSS] pencil onLongClick error: {e}")
+                        return False
+                self._pencil_long_click_listener = _OnLongClickListener(on_long_click)
+                try:
+                    pencil.setLongClickable(True)
+                except Exception:
+                    pass
+                pencil.setOnLongClickListener(self._pencil_long_click_listener)
                 self._pencil_hook_view = pencil
             except Exception as e:
                 log(f"[RSS] pencil hook attach listener error: {e}")
@@ -1690,9 +1719,14 @@ class Plugin(BasePlugin):
             h.setOnTouchListener(None)
         except Exception:
             pass
+        try:
+            h.setOnLongClickListener(None)
+        except Exception:
+            pass
         log(f"[RSS] pencil hook detached: {self._pencil_debug_tag(h)}")
         self._pencil_hook_view = None
         self._pencil_touch_listener = None
+        self._pencil_long_click_listener = None
         self._pencil_press_armed = False
         self._pencil_down_x = 0.0
         self._pencil_down_y = 0.0
