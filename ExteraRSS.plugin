@@ -3266,6 +3266,7 @@ class Plugin(BasePlugin):
         # Edge-to-edge style images inside the padded col by giving negative margin? No, just round them
         loading_images_tv = None
         loading_images_pb = None
+        loading_row = None
         if len(images) > 1:
             loading_row = LinearLayout(activity)
             loading_row.setOrientation(LinearLayout.HORIZONTAL)
@@ -3318,7 +3319,7 @@ class Plugin(BasePlugin):
                 else:
                     lp_iv.leftMargin = _dp(6)
                 row.addView(iv, lp_iv)
-                self._load_image_into(img_url, iv, quick_preview=True, loading_label=loading_images_tv, loading_spinner=loading_images_pb)
+                self._load_image_into(img_url, iv, quick_preview=True, loading_label=loading_images_tv, loading_spinner=loading_images_pb, loading_container=loading_row)
             if len(images) % 2 == 1 and row is not None:
                 spacer = View(activity)
                 row.addView(spacer, LinearLayout.LayoutParams(0, _dp(220), 1.0))
@@ -3343,7 +3344,7 @@ class Plugin(BasePlugin):
                 ilp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, _dp(500))
                 ilp.bottomMargin = _dp(12 if img_idx < len(images) - 1 else 24)
                 col.addView(iv, ilp)
-                self._load_image_into(img_url, iv, quick_preview=True, loading_label=loading_images_tv, loading_spinner=loading_images_pb)
+                self._load_image_into(img_url, iv, quick_preview=True, loading_label=loading_images_tv, loading_spinner=loading_images_pb, loading_container=loading_row)
 
         if body:
             tv_body = TextView(activity)
@@ -3638,7 +3639,7 @@ class Plugin(BasePlugin):
         except Exception: run_on_ui_thread(detach)
 
     # ---------- image loading ----------
-    def _load_image_into(self, url: str, iv: ImageView, quick_preview: bool = False, loading_label: Optional[TextView] = None, loading_spinner: Optional[View] = None):
+    def _load_image_into(self, url: str, iv: ImageView, quick_preview: bool = False, loading_label: Optional[TextView] = None, loading_spinner: Optional[View] = None, loading_container: Optional[View] = None):
         url = _upgrade_image_url(url)
         if not url: return
 
@@ -3664,12 +3665,14 @@ class Plugin(BasePlugin):
             run_on_ui_thread(_tick)
 
         def _set_loading_visible(vis: bool):
+            if loading_container is not None:
+                try:
+                    loading_container.setVisibility(View.VISIBLE if vis else View.GONE)
+                except Exception:
+                    pass
             if loading_label is not None:
                 try:
-                    row = getattr(loading_label, "_rss_loading_row", None)
-                    if row is not None:
-                        row.setVisibility(View.VISIBLE if vis else View.GONE)
-                    else:
+                    if loading_container is None:
                         loading_label.setVisibility(View.VISIBLE if vis else View.GONE)
                 except Exception:
                     pass
@@ -3933,6 +3936,7 @@ class Plugin(BasePlugin):
             # IMAGE (Edge to Edge)
             loading_img_tv = None
             loading_img_pb = None
+            loading_row = None
             if images:
                 loading_row = LinearLayout(ctx)
                 loading_row.setOrientation(LinearLayout.HORIZONTAL)
@@ -3949,7 +3953,6 @@ class Plugin(BasePlugin):
                 try: loading_row.setVisibility(View.GONE)
                 except Exception: pass
                 card.addView(loading_row)
-                loading_img_tv._rss_loading_row = loading_row
 
             feed_img_mode = str(self._img_layout_mode or "primary")
             if images and feed_img_mode == "grid" and len(images) > 1:
@@ -3992,7 +3995,7 @@ class Plugin(BasePlugin):
                         lp_iv.leftMargin = _dp(6)
                     row.addView(iv, lp_iv)
                     self._attach_feed_swipe_touch(iv)
-                    self._load_image_into(img_url, iv, quick_preview=True, loading_label=loading_img_tv, loading_spinner=loading_img_pb)
+                    self._load_image_into(img_url, iv, quick_preview=True, loading_label=loading_img_tv, loading_spinner=loading_img_pb, loading_container=loading_row)
                 if len(images) % 2 == 1 and row is not None:
                     spacer = View(ctx)
                     row.addView(spacer, LinearLayout.LayoutParams(0, cell_h, 1.0))
@@ -4013,7 +4016,7 @@ class Plugin(BasePlugin):
                 iv.setBackgroundColor(_c("#00000000")) 
                 card.addView(iv, ilp)
                 self._attach_feed_swipe_touch(iv)
-                self._load_image_into(img, iv, quick_preview=True, loading_label=loading_img_tv, loading_spinner=loading_img_pb)
+                self._load_image_into(img, iv, quick_preview=True, loading_label=loading_img_tv, loading_spinner=loading_img_pb, loading_container=loading_row)
 
             # CONTENT (Title, text, replies)
             content_box = LinearLayout(ctx)
