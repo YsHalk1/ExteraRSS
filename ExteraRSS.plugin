@@ -12,6 +12,10 @@ from ui.settings import Header, Divider, Switch, Text
 
 from android_utils import log, run_on_ui_thread, OnClickListener
 from client_utils import get_last_fragment
+try:
+    from hook_utils import get_private_field
+except Exception:
+    get_private_field = None
 
 from org.telegram.messenger import AndroidUtilities, ApplicationLoader
 
@@ -1530,6 +1534,25 @@ class Plugin(BasePlugin):
         except Exception:
             return False
 
+    def _find_pencil_view_from_fragment(self, fragment) -> Optional[View]:
+        try:
+            if fragment is None or get_private_field is None:
+                return None
+            keys = ("floatingButtonContainer", "floatingButton2Container", "floatingButton")
+            for key in keys:
+                try:
+                    v = get_private_field(fragment, key)
+                except Exception:
+                    v = None
+                if isinstance(v, View):
+                    log(f"[RSS] pencil hook field hit: {key} -> {self._pencil_debug_tag(v)}")
+                    return v
+            log("[RSS] pencil hook field scan: no floating button fields")
+            return None
+        except Exception as e:
+            log(f"[RSS] pencil hook field scan error: {e}")
+            return None
+
     def _find_pencil_view(self, root) -> Optional[View]:
         try:
             if not isinstance(root, ViewGroup): return None
@@ -1579,12 +1602,18 @@ class Plugin(BasePlugin):
             decor = activity.getWindow().getDecorView()
             if not isinstance(decor, ViewGroup): return
 
-            pencil = self._find_pencil_view(decor)
+            pencil = self._find_pencil_view_from_fragment(fragment)
+            if pencil is None:
+                pencil = self._find_pencil_view(decor)
             if pencil is None:
                 log("[RSS] pencil hook: target view not found")
                 return
 
-            log(f"[RSS] pencil hook attached: {self._pencil_debug_tag(pencil)}")
+            try:
+                frag_name = str(fragment.getClass().getSimpleName() or "")
+            except Exception:
+                frag_name = ""
+            log(f"[RSS] pencil hook attached ({frag_name}): {self._pencil_debug_tag(pencil)}")
 
             def on_touch(_v, ev):
                 try:
