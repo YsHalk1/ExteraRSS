@@ -252,9 +252,16 @@ def _clamp_history_posts(v: Any) -> int:
         x = 20
     if x < 1:
         x = 1
-    if x > 50:
-        x = 50
+    if x > 100:
+        x = 100
     return x
+
+
+def _sub_to_label(sub: str) -> str:
+    s = _norm_sub(sub)
+    if s.startswith("tguser:"):
+        return "@" + s.split(":", 1)[1]
+    return s
 
 def _is_ru_locale() -> bool:
     try:
@@ -1119,6 +1126,7 @@ class Plugin(BasePlugin):
         self._category_filter: str = ""
         self._source_exclude_filters: List[str] = []
         self._category_exclude_filters: List[str] = []
+        self._sub_exclude_filters: List[str] = []
         self._source_btn: Optional[TextView] = None
         self._nav_feed_btn: Optional[TextView] = None
         self._nav_subs_btn: Optional[TextView] = None
@@ -1163,6 +1171,9 @@ class Plugin(BasePlugin):
         else:
             cat_arr = _safe_json_load(cat_ex_raw, [])
             self._category_exclude_filters = [_norm_category(x) for x in cat_arr if _norm_category(x)]
+        sub_ex_raw = self.get_setting("sub_exclude_filters", "")
+        sub_ex_arr = _safe_json_load(sub_ex_raw, []) if sub_ex_raw else []
+        self._sub_exclude_filters = [_norm_sub(x) for x in sub_ex_arr if _norm_sub(x)]
         if self._img_preview_mode not in ("compact", "full"):
             self._img_preview_mode = "compact"
         self._refresh_fade_token = 0
@@ -1369,6 +1380,12 @@ class Plugin(BasePlugin):
                 cat_old = _norm_category(self.get_setting("category_exclude_filter", "") or "")
                 self._category_exclude_filters = ([cat_old] if cat_old else [])
         except Exception: pass
+        try:
+            sub_ex_raw = self.get_setting("sub_exclude_filters", "")
+            sub_ex_arr = _safe_json_load(sub_ex_raw, []) if sub_ex_raw else []
+            self._sub_exclude_filters = [_norm_sub(x) for x in sub_ex_arr if _norm_sub(x)]
+        except Exception:
+            pass
         try: raw_corner = self.get_setting("ui_corner_scale", f"{self._corner_scale:.2f}")
         except Exception: raw_corner = self._corner_scale
         self._set_corner_scale(raw_corner, persist=False)
@@ -2079,6 +2096,14 @@ class Plugin(BasePlugin):
     def _source_filter_options(self) -> List[str]:
         return [""] + self._available_sources()
 
+    def _sub_exclude_options(self) -> List[str]:
+        vals = []
+        for it in self._get_sub_entries():
+            sub = _norm_sub(str(it.get("sub") or ""))
+            if sub:
+                vals.append(sub)
+        return _uniq_keep_order(vals)
+
     def _available_categories(self) -> List[str]:
         vals = []
         for it in self._get_cache():
@@ -2163,6 +2188,41 @@ class Plugin(BasePlugin):
         self._animate_list_once = False
         self._render()
         return is_excluded
+
+    def _toggle_sub_exclude_filter(self, sub_key: str) -> bool:
+        val = _norm_sub(sub_key)
+        if not val:
+            return False
+        arr = list(self._sub_exclude_filters)
+        if val in arr:
+            arr = [x for x in arr if x != val]
+            is_excluded = False
+        else:
+            arr.append(val)
+            is_excluded = True
+        self._sub_exclude_filters = _uniq_keep_order(arr)
+        try:
+            self.set_setting("sub_exclude_filters", json.dumps(self._sub_exclude_filters, ensure_ascii=False))
+        except Exception:
+            pass
+        self._render()
+        return is_excluded
+
+    def _is_item_blocked_by_sub_exclude(self, it: Dict[str, Any]) -> bool:
+        try:
+            blocked = set(self._sub_exclude_filters or [])
+            if not blocked:
+                return False
+            src_handle = str(it.get("source_handle", "") or "").strip()
+            src = str(it.get("source", "") or "").strip()
+            if src_handle.startswith("@"):
+                if _norm_sub("tguser:" + src_handle[1:]) in blocked:
+                    return True
+            if src and _norm_sub(src) in blocked:
+                return True
+        except Exception:
+            return False
+        return False
 
     def _open_top_filter_picker(self):
         if self._mode in ("settings", "subs"): return
@@ -2313,6 +2373,7 @@ class Plugin(BasePlugin):
 
     def _refresh_now(self):
         sub_entries = self._get_sub_entries()
+        active_subs = {_norm_sub(str(x.get("sub") or "")) for x in sub_entries if _norm_sub(str(x.get("sub") or ""))}
         old = self._get_cache()
         old_by_key = {}
         for x in old:
@@ -2369,6 +2430,28 @@ class Plugin(BasePlugin):
             if not key or key in seen: continue
             seen.add(key)
             uniq.append(it)
+
+        if active_subs:
+            for old_it in old:
+                if not isinstance(old_it, dict):
+                    continue
+                src_handle = str(old_it.get("source_handle", "") or "").strip()
+                src = str(old_it.get("source", "") or "").strip()
+                keep = False
+                if src_handle and src_handle.startswith("@"):
+                    tg_sub = _norm_sub("tguser:" + src_handle[1:])
+                    if tg_sub in active_subs:
+                        keep = True
+                if (not keep) and src:
+                    if _norm_sub(src) in active_subs:
+                        keep = True
+                if not keep:
+                    continue
+                key = str(old_it.get("tg_post_id") or old_it.get("link") or "")
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                uniq.append(old_it)
 
         uniq.sort(key=lambda x: int(x.get("sort_ts", x.get("ts", 0) or 0) or 0), reverse=True)
         self._set_cache(uniq[:900])
@@ -2913,13 +2996,13 @@ class Plugin(BasePlugin):
         top.addView(self._spacer_h(activity, 12))
 
         title = TextView(activity)
-        title.setText(_tr("Категория", "Category"))
+        title.setText(_tr("Редактирование подписки", "Edit subscription"))
         title.setTextSize(26)
         title.setTypeface(None, Typeface.BOLD)
         title.setTextColor(_c(COLOR_TEXT_PR))
         top.addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
 
-        show = ("@" + sub_key.split(":", 1)[1]) if sub_key.startswith("tguser:") else sub_key
+        show = _sub_to_label(sub_key)
         source_tv = TextView(activity)
         source_tv.setText(show)
         source_tv.setTextSize(16)
@@ -2927,6 +3010,26 @@ class Plugin(BasePlugin):
         source_tv.setAlpha(0.8)
         source_tv.setPadding(0, _dp(30), 0, _dp(12))
         content.addView(source_tv)
+
+        link_hint = TextView(activity)
+        link_hint.setText(_tr("Ссылка / источник", "Link / source"))
+        link_hint.setTextSize(14)
+        link_hint.setTextColor(_c(COLOR_TEXT_SEC))
+        link_hint.setPadding(0, _dp(12), 0, _dp(8))
+        content.addView(link_hint)
+
+        source_input = EditText(activity)
+        source_input.setHint(_tr("https://... или @username", "https://... or @username"))
+        source_input.setSingleLine(True)
+        source_input.setText(sub_key)
+        source_input.setPadding(_dp(16), _dp(16), _dp(16), _dp(16))
+        source_input.setTextColor(_c(COLOR_TEXT_PR))
+        try:
+            source_input.setHintTextColor(_c("#66FFFFFF"))
+        except Exception:
+            pass
+        source_input.setBackground(self._bg_rounded(COLOR_CARD, COLOR_STROKE, stroke_dp=1, radius_dp=16))
+        content.addView(source_input, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
         category_input = EditText(activity)
         category_input.setHint(_tr("Любая категория", "Any category"))
@@ -2937,13 +3040,15 @@ class Plugin(BasePlugin):
         try: category_input.setHintTextColor(_c("#66FFFFFF"))
         except Exception: pass
         category_input.setBackground(self._bg_rounded(COLOR_CARD, COLOR_STROKE, stroke_dp=1, radius_dp=16))
-        content.addView(category_input, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        lp_cat = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp_cat.topMargin = _dp(10)
+        content.addView(category_input, lp_cat)
 
         push = View(activity)
         push.setLayoutParams(LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1.0))
         content.addView(push)
 
-        save_btn = self._primary_button(activity, _tr("Сохранить", "Save"), lambda: self._save_sub_category(sub_key, category_input))
+        save_btn = self._primary_button(activity, _tr("Сохранить", "Save"), lambda: self._save_sub_edit(sub_key, source_input, category_input))
         content.addView(save_btn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
         self._cat_overlay = overlay
@@ -2952,16 +3057,48 @@ class Plugin(BasePlugin):
         self._bind_back_handler(overlay, lambda: self._handle_back_action(), "_cat_back_listener")
         self._slide_up_enter(overlay, content)
 
-    def _save_sub_category(self, sub_key: str, category_input: EditText):
+    def _save_sub_edit(self, sub_key: str, source_input: EditText, category_input: EditText):
+        new_sub = _norm_sub(str(source_input.getText().toString()))
+        if not new_sub:
+            try:
+                Toast.makeText(ApplicationLoader.applicationContext, _tr("Укажите корректный источник", "Enter a valid source"), Toast.LENGTH_SHORT).show()
+            except Exception:
+                pass
+            return
         cat = _norm_category(str(category_input.getText().toString()))
         entries = self._get_sub_entries()
         changed = False
+        exists_same = False
+        for it in entries:
+            cur = str(it.get("sub") or "")
+            if cur != sub_key and cur == new_sub:
+                exists_same = True
+                break
+        if exists_same:
+            try:
+                Toast.makeText(ApplicationLoader.applicationContext, _tr("Такая подписка уже есть", "Subscription already exists"), Toast.LENGTH_SHORT).show()
+            except Exception:
+                pass
+            return
         for it in entries:
             if str(it.get("sub") or "") == sub_key:
+                it["sub"] = new_sub
                 it["category"] = cat
                 changed = True; break
         if not changed: return
         self._set_sub_entries(entries)
+        if self._sub_exclude_filters:
+            updated = []
+            for s in self._sub_exclude_filters:
+                if s == sub_key:
+                    updated.append(new_sub)
+                else:
+                    updated.append(s)
+            self._sub_exclude_filters = _uniq_keep_order(updated)
+            try:
+                self.set_setting("sub_exclude_filters", json.dumps(self._sub_exclude_filters, ensure_ascii=False))
+            except Exception:
+                pass
         self._close_category_screen(animated=True)
         if self._overlay is not None:
             self._render()
@@ -3573,6 +3710,9 @@ class Plugin(BasePlugin):
                     if not src_val: src_val = str(it.get("source", "") or "").strip()
                     if src_val not in excl_set: items.append(it)
 
+        if self._sub_exclude_filters:
+            items = [it for it in items if not self._is_item_blocked_by_sub_exclude(it)]
+
         if not items:
             t = TextView(ctx)
             txt = _tr("По выбранной категории пока ничего нет.\nНажми «Категория», чтобы выбрать другую.", "No items for the selected category yet.") if by_category else _tr("По выбранному источнику пока ничего нет.\nНажми кнопку фильтра сверху.", "No items for the selected source yet.")
@@ -3801,8 +3941,8 @@ class Plugin(BasePlugin):
 
         sb_hist = SeekBar(ctx)
         try:
-            sb_hist.setMax(49)
-            sb_hist.setProgress(max(0, min(49, int(hist_cur) - 1)))
+            sb_hist.setMax(99)
+            sb_hist.setProgress(max(0, min(99, int(hist_cur) - 1)))
         except Exception:
             pass
         hist_card.addView(sb_hist, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
@@ -3810,14 +3950,14 @@ class Plugin(BasePlugin):
         def on_hist_progress(_sb, progress, from_user):
             try:
                 if not from_user: return
-                val = max(1, min(50, int(progress) + 1))
+                val = max(1, min(100, int(progress) + 1))
                 hist_tv.setText((_tr("Текущее значение", "Current value") + f": {val}"))
             except Exception:
                 pass
 
         def on_hist_stop(_sb):
             try:
-                val = max(1, min(50, int(_sb.getProgress() or 0) + 1))
+                val = max(1, min(100, int(_sb.getProgress() or 0) + 1))
                 self._apply_history_limit(val)
             except Exception:
                 pass
@@ -4092,7 +4232,8 @@ class Plugin(BasePlugin):
                 
                 if self._animate_list_once and idx < 12: self._animate_entry(row, idx)
 
-                show = ("@" + sub.split(":", 1)[1]) if sub.startswith("tguser:") else sub
+                show = _sub_to_label(sub)
+                is_excluded = sub in set(self._sub_exclude_filters or [])
 
                 txt_col = LinearLayout(ctx)
                 txt_col.setOrientation(LinearLayout.VERTICAL)
@@ -4102,7 +4243,7 @@ class Plugin(BasePlugin):
                 tv.setText(show)
                 tv.setTextSize(16)
                 tv.setTypeface(None, Typeface.BOLD)
-                tv.setTextColor(_c(COLOR_TEXT_PR))
+                tv.setTextColor(_c("#FFFF6B6B" if is_excluded else COLOR_TEXT_PR))
                 txt_col.addView(tv)
 
                 if cat:
@@ -4113,10 +4254,22 @@ class Plugin(BasePlugin):
                     tv_cat.setPadding(0, _dp(4), 0, 0)
                     txt_col.addView(tv_cat)
 
+                ex_btn = self._top_button(ctx, _tr(" исключить ", " exclude "), lambda key=sub: self._toggle_sub_exclude_filter(key))
+                if is_excluded:
+                    ex_btn.setBackground(self._bg_rounded("#33FF3B30", radius_dp=16))
+                    try: ex_btn.setAlpha(1.0)
+                    except Exception: pass
+                else:
+                    ex_btn.setBackground(self._bg_rounded("#1AFFFFFF", radius_dp=16))
+                    try: ex_btn.setAlpha(0.85)
+                    except Exception: pass
+
                 cat_btn = self._top_button(ctx, " ✎ ", lambda key=sub: self._open_category_screen(key))
                 delb = self._top_button(ctx, " ✕ ", lambda key=sub: self._remove_sub(key))
                 delb.setBackground(self._bg_rounded("#26FF3B30", radius_dp=16)) # Red warning color
                 
+                row.addView(ex_btn)
+                row.addView(self._spacer_h(ctx, 8))
                 row.addView(cat_btn)
                 row.addView(self._spacer_h(ctx, 8))
                 row.addView(delb)
@@ -4239,6 +4392,27 @@ class Plugin(BasePlugin):
         if not sub_key: return
         entries = [x for x in self._get_sub_entries() if str(x.get("sub") or "") != sub_key]
         self._set_sub_entries(entries)
+        if self._sub_exclude_filters:
+            self._sub_exclude_filters = [x for x in self._sub_exclude_filters if x != sub_key]
+            try:
+                self.set_setting("sub_exclude_filters", json.dumps(self._sub_exclude_filters, ensure_ascii=False))
+            except Exception:
+                pass
+        # Если подписка удалена полностью — чистим связанные кэш-записи.
+        old_cache = self._get_cache()
+        kept = []
+        for it in old_cache:
+            src_handle = str(it.get("source_handle", "") or "").strip()
+            src = str(it.get("source", "") or "").strip()
+            drop = False
+            if src_handle.startswith("@") and sub_key.startswith("tguser:"):
+                drop = (_norm_sub("tguser:" + src_handle[1:]) == sub_key)
+            if (not drop) and src:
+                drop = (_norm_sub(src) == sub_key)
+            if not drop:
+                kept.append(it)
+        if len(kept) != len(old_cache):
+            self._set_cache(kept)
         self._render()
         if self._overlay is not None: self._set_refreshing_ui(True)
         self._refresh_async()
