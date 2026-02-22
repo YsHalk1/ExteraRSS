@@ -1090,10 +1090,10 @@ class Plugin(BasePlugin):
         self._mini_overlay: Optional[FrameLayout] = None
         self._mini_link: str = ""
         self._back_tracking_paused = False
-        self._hidden_hotspot: Optional[View] = None
-        self._hotspot_touch_listener = None
-        self._hotspot_touch_token = 0
-        self._hotspot_press_armed = False
+        self._pencil_hook_view: Optional[View] = None
+        self._pencil_touch_listener = None
+        self._pencil_touch_token = 0
+        self._pencil_press_armed = False
 
         self._source_filter: str = ""
         self._category_filter: str = ""
@@ -1476,9 +1476,100 @@ class Plugin(BasePlugin):
         except Exception:
             return False
 
-    def _install_hidden_hotspot_trigger(self):
+    def _pencil_debug_tag(self, v: Optional[View]) -> str:
+        if v is None: return "<none>"
+        try: cls = str(v.getClass().getSimpleName() or "View")
+        except Exception: cls = "View"
+        parts = [cls]
         try:
-            if self._hidden_hotspot is not None:
+            rid = int(v.getId())
+            if rid > 0:
+                try:
+                    name = str(v.getResources().getResourceEntryName(rid) or "")
+                    if name: parts.append(f"id={name}")
+                except Exception:
+                    parts.append(f"id#{rid}")
+        except Exception:
+            pass
+        try:
+            desc = str(v.getContentDescription() or "").strip()
+            if desc: parts.append(f"desc='{desc}'")
+        except Exception:
+            pass
+        try:
+            x = int(v.getLeft()); y = int(v.getTop()); w = int(v.getWidth()); h = int(v.getHeight())
+            parts.append(f"xywh={x},{y},{w},{h}")
+        except Exception:
+            pass
+        return " ".join(parts)
+
+    def _looks_like_pencil_action(self, v: View, root_w: int, root_h: int) -> bool:
+        try:
+            if v is None: return False
+            w = int(v.getWidth()); h = int(v.getHeight())
+            if w <= 0 or h <= 0: return False
+            x = int(v.getLeft()); y = int(v.getTop())
+            if root_w > 0 and (x + w) < int(root_w * 0.65): return False
+            if root_h > 0 and y < int(root_h * 0.45): return False
+            text = ""
+            try: text += " " + str(v.getContentDescription() or "")
+            except Exception: pass
+            try: text += " " + str(v.getClass().getSimpleName() or "")
+            except Exception: pass
+            try:
+                rid = int(v.getId())
+                if rid > 0:
+                    try: text += " " + str(v.getResources().getResourceEntryName(rid) or "")
+                    except Exception: pass
+            except Exception:
+                pass
+            low = text.lower()
+            keys = ("pencil", "compose", "new", "create", "write", "edit", "floating", "fab", "message", "карандаш", "создать", "напис")
+            if any(k in low for k in keys): return True
+            return bool(isinstance(v, ImageView) and min(w, h) >= _dp(36) and max(w, h) <= _dp(90))
+        except Exception:
+            return False
+
+    def _find_pencil_view(self, root) -> Optional[View]:
+        try:
+            if not isinstance(root, ViewGroup): return None
+            rw = int(root.getWidth()); rh = int(root.getHeight())
+            stack = [root]
+            candidates = []
+            while stack:
+                cur = stack.pop()
+                if isinstance(cur, ViewGroup):
+                    try: cnt = int(cur.getChildCount())
+                    except Exception: cnt = 0
+                    for i in range(cnt):
+                        try: stack.append(cur.getChildAt(i))
+                        except Exception: pass
+                if cur is root: continue
+                try:
+                    if int(cur.getVisibility()) != int(View.VISIBLE):
+                        continue
+                except Exception:
+                    pass
+                if self._looks_like_pencil_action(cur, rw, rh):
+                    candidates.append(cur)
+            if not candidates:
+                log("[RSS] pencil hook: no candidates found")
+                return None
+            try:
+                candidates.sort(key=lambda v: (-(int(v.getLeft()) + int(v.getWidth())), -(int(v.getTop()) + int(v.getHeight())), -int(v.getWidth()) * int(v.getHeight())))
+            except Exception:
+                pass
+            top = candidates[0]
+            for i, c in enumerate(candidates[:5]):
+                log(f"[RSS] pencil hook candidate[{i}]: {self._pencil_debug_tag(c)}")
+            return top
+        except Exception as e:
+            log(f"[RSS] pencil hook find error: {e}")
+            return None
+
+    def _install_pencil_hook_view_trigger(self):
+        try:
+            if self._pencil_hook_view is not None:
                 return
             fragment = get_last_fragment()
             if not self._is_menu_fragment(fragment):
@@ -1488,16 +1579,12 @@ class Plugin(BasePlugin):
             decor = activity.getWindow().getDecorView()
             if not isinstance(decor, ViewGroup): return
 
-            hotspot = View(activity)
-            lp = FrameLayout.LayoutParams(_dp(88), _dp(88))
-            lp.gravity = int(Gravity.END | Gravity.BOTTOM)
-            lp.rightMargin = _dp(8)
-            lp.bottomMargin = _dp(8)
-            hotspot.setLayoutParams(lp)
-            hotspot.setBackgroundColor(_c("#00000000"))
-            hotspot.setAlpha(0.01)
-            hotspot.setClickable(True)
-            hotspot.setLongClickable(True)
+            pencil = self._find_pencil_view(decor)
+            if pencil is None:
+                log("[RSS] pencil hook: target view not found")
+                return
+
+            log(f"[RSS] pencil hook attached: {self._pencil_debug_tag(pencil)}")
 
             def on_touch(_v, ev):
                 try:
@@ -1506,51 +1593,53 @@ class Plugin(BasePlugin):
                 except Exception:
                     return False
                 if act == int(MotionEvent.ACTION_DOWN):
-                    self._hotspot_press_armed = True
-                    self._hotspot_touch_token += 1
-                    token = int(self._hotspot_touch_token)
+                    self._pencil_press_armed = True
+                    self._pencil_touch_token += 1
+                    token = int(self._pencil_touch_token)
+                    log("[RSS] pencil hold: ACTION_DOWN armed")
                     def trigger():
                         try:
-                            if token != int(self._hotspot_touch_token): return
-                            if not self._hotspot_press_armed: return
+                            if token != int(self._pencil_touch_token): return
+                            if not self._pencil_press_armed: return
                             frag = get_last_fragment()
                             if not self._is_menu_fragment(frag): return
-                            self._hotspot_press_armed = False
-                            try: hotspot.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                            self._pencil_press_armed = False
+                            log("[RSS] pencil hold: 500ms trigger fired")
+                            try: pencil.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                             except Exception: pass
                             self._open(frag)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            log(f"[RSS] pencil hold trigger error: {e}")
                     try: AndroidUtilities.runOnUIThread(Runnable(trigger), 500)
                     except Exception: pass
-                    return True
+                    return False
                 if act in (int(MotionEvent.ACTION_UP), int(MotionEvent.ACTION_CANCEL), int(MotionEvent.ACTION_MOVE)):
-                    self._hotspot_press_armed = False
-                    return True
+                    if self._pencil_press_armed:
+                        log(f"[RSS] pencil hold: disarm action={act}")
+                    self._pencil_press_armed = False
+                    return False
                 return False
 
             try:
-                self._hotspot_touch_listener = _OnTouchListener(on_touch)
-                hotspot.setOnTouchListener(self._hotspot_touch_listener)
-            except Exception:
-                pass
+                self._pencil_touch_listener = _OnTouchListener(on_touch)
+                pencil.setOnTouchListener(self._pencil_touch_listener)
+                self._pencil_hook_view = pencil
+            except Exception as e:
+                log(f"[RSS] pencil hook attach listener error: {e}")
+        except Exception as e:
+            log(f"[RSS] pencil hook install error: {e}")
 
-            decor.addView(hotspot, lp)
-            self._hidden_hotspot = hotspot
-        except Exception:
-            pass
-
-    def _remove_hidden_hotspot_trigger(self):
-        h = self._hidden_hotspot
+    def _remove_pencil_hook_view_trigger(self):
+        h = self._pencil_hook_view
         if h is None: return
         try:
-            p = h.getParent()
-            if p and isinstance(p, ViewGroup): p.removeView(h)
+            h.setOnTouchListener(None)
         except Exception:
             pass
-        self._hidden_hotspot = None
-        self._hotspot_touch_listener = None
-        self._hotspot_press_armed = False
+        log(f"[RSS] pencil hook detached: {self._pencil_debug_tag(h)}")
+        self._pencil_hook_view = None
+        self._pencil_touch_listener = None
+        self._pencil_press_armed = False
 
     # ---------- lifecycle ----------
     def on_plugin_load(self):
@@ -1558,7 +1647,7 @@ class Plugin(BasePlugin):
         try: self._unread_new_posts = max(0, int(self.get_setting("rss_unread_new", "0") or 0))
         except Exception: self._unread_new_posts = 0
         self._install_drawer_item()
-        run_on_ui_thread(self._install_hidden_hotspot_trigger)
+        run_on_ui_thread(self._install_pencil_hook_view_trigger)
         self._bg_thread_running = True
         threading.Thread(target=self._bg_worker, daemon=True).start()
 
@@ -1571,7 +1660,7 @@ class Plugin(BasePlugin):
         run_on_ui_thread(lambda: self._close_post_screen(animated=False))
         run_on_ui_thread(lambda: self._close_image_screen(animated=False))
         run_on_ui_thread(lambda: self._close_mini_overlay(animated=False))
-        run_on_ui_thread(self._remove_hidden_hotspot_trigger)
+        run_on_ui_thread(self._remove_pencil_hook_view_trigger)
 
     # ---------- bg worker ----------
     def _bg_worker(self):
@@ -2330,7 +2419,7 @@ class Plugin(BasePlugin):
     # ---------- MAIN SCREEN ----------
     def _open(self, fragment):
         self._reload_ui_scale_from_settings()
-        self._remove_hidden_hotspot_trigger()
+        self._remove_pencil_hook_view_trigger()
         if self._unread_new_posts > 0:
             self._set_unread_count(0, persist=True)
         if self._overlay is not None: return
@@ -2512,7 +2601,7 @@ class Plugin(BasePlugin):
             self._corner_seek_listener = None
             self._accent_seek_listener = None
             self._bg_minutes_seek_listener = None
-            run_on_ui_thread(self._install_hidden_hotspot_trigger)
+            run_on_ui_thread(self._install_pencil_hook_view_trigger)
 
         if not animated or content is None: detach(); return
         self._slide_down_exit(overlay, content)
