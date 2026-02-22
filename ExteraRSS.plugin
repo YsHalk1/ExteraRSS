@@ -244,6 +244,18 @@ def _clamp_bg_refresh_seconds(v: Any) -> int:
         x = 1800
     return x
 
+
+def _clamp_history_posts(v: Any) -> int:
+    try:
+        x = int(round(float(v)))
+    except Exception:
+        x = 20
+    if x < 1:
+        x = 1
+    if x > 50:
+        x = 50
+    return x
+
 def _is_ru_locale() -> bool:
     try:
         if JavaLocale is not None:
@@ -1124,10 +1136,12 @@ class Plugin(BasePlugin):
         self._ui_pad = _clamp_ui_pad(self.get_setting("ui_pad", "16"))
         self._corner_scale = _clamp_corner_scale(self.get_setting("ui_corner_scale", "1.00"))
         self._accent_color = _norm_accent_hex(self.get_setting("ui_accent", COLOR_ACCENT))
+        self._history_posts = _clamp_history_posts(self.get_setting("history_posts_limit", "20"))
         global _UI_SCALE
         _UI_SCALE = float(self._ui_scale)
         self._ui_seek_listener = None
         self._ui_pad_seek_listener = None
+        self._history_seek_listener = None
         self._corner_seek_listener = None
         self._accent_seek_listener = None
         self._suppress_open_refresh_once = False
@@ -1497,6 +1511,16 @@ class Plugin(BasePlugin):
                     if name: parts.append(f"id={name}")
                 except Exception:
                     parts.append(f"id#{rid}")
+        except Exception:
+            pass
+
+    def _apply_history_limit(self, value: Any):
+        try:
+            val = _clamp_history_posts(value)
+            self._history_posts = val
+            try: self.set_setting("history_posts_limit", str(val))
+            except Exception: pass
+            self._render()
         except Exception:
             pass
         try:
@@ -3308,9 +3332,14 @@ class Plugin(BasePlugin):
                         zoom["pan_y"] = float(ev.getRawY())
                         zoom["swipe_x"] = float(ev.getRawX())
                         zoom["swipe_y"] = float(ev.getRawY())
+                        try:
+                            par = iv.getParent()
+                            if par is not None: par.requestDisallowInterceptTouchEvent(True)
+                        except Exception:
+                            pass
                     except Exception:
                         pass
-                    return bool(float(zoom.get("scale", 1.0)) > 1.0)
+                    return True
                 if pcount == 1 and act == int(MotionEvent.ACTION_MOVE):
                     sc = float(zoom.get("scale", 1.0))
                     if sc > 1.0:
@@ -3565,7 +3594,7 @@ class Plugin(BasePlugin):
         try: self._feed_item_touch_listener = _OnTouchListener(self._handle_global_touch)
         except Exception: self._feed_item_touch_listener = None
 
-        for idx, it in enumerate(items[:320]):
+        for idx, it in enumerate(items[:max(1, int(self._history_posts or 20))]):
             title = _strip_tags_and_format(str(it.get("title", "") or ""))
             if not title: title = _strip_tags_and_format(str(it.get("voice", "") or ""))[:120]
             if not title: title = _strip_tags_and_format(str(it.get("doc", "") or ""))[:120]
@@ -3745,6 +3774,59 @@ class Plugin(BasePlugin):
         img_row.addView(compact_btn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
         img_row.addView(self._spacer_h(ctx, 10))
         img_row.addView(full_btn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
+
+        hist_hint = TextView(ctx)
+        hist_hint.setText(_tr("Количество постов в истории", "Posts history count"))
+        hist_hint.setTextSize(14)
+        hist_hint.setTextColor(_c(COLOR_TEXT_SEC))
+        hist_hint.setPadding(_dp(4), 0, 0, _dp(8))
+        self._list_container.addView(hist_hint)
+
+        hist_card = LinearLayout(ctx)
+        hist_card.setOrientation(LinearLayout.VERTICAL)
+        hist_card.setPadding(_dp(20), _dp(20), _dp(20), _dp(20))
+        hist_card.setBackground(self._bg_rounded(COLOR_CARD, COLOR_STROKE, stroke_dp=1, radius_dp=CORNER_RADIUS_DP))
+        lp_hist = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp_hist.bottomMargin = _dp(16)
+        self._list_container.addView(hist_card, lp_hist)
+
+        hist_cur = _clamp_history_posts(self._history_posts)
+        hist_tv = TextView(ctx)
+        hist_tv.setText((_tr("Текущее значение", "Current value") + f": {hist_cur}"))
+        hist_tv.setTextSize(16)
+        hist_tv.setTextColor(_c(COLOR_TEXT_PR))
+        hist_tv.setTypeface(None, Typeface.BOLD)
+        hist_tv.setPadding(0, 0, 0, _dp(16))
+        hist_card.addView(hist_tv)
+
+        sb_hist = SeekBar(ctx)
+        try:
+            sb_hist.setMax(49)
+            sb_hist.setProgress(max(0, min(49, int(hist_cur) - 1)))
+        except Exception:
+            pass
+        hist_card.addView(sb_hist, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        def on_hist_progress(_sb, progress, from_user):
+            try:
+                if not from_user: return
+                val = max(1, min(50, int(progress) + 1))
+                hist_tv.setText((_tr("Текущее значение", "Current value") + f": {val}"))
+            except Exception:
+                pass
+
+        def on_hist_stop(_sb):
+            try:
+                val = max(1, min(50, int(_sb.getProgress() or 0) + 1))
+                self._apply_history_limit(val)
+            except Exception:
+                pass
+
+        try:
+            self._history_seek_listener = _OnSeekBarChangeListener(on_hist_progress, None, on_hist_stop)
+            sb_hist.setOnSeekBarChangeListener(self._history_seek_listener)
+        except Exception:
+            pass
 
         card = LinearLayout(ctx)
         card.setOrientation(LinearLayout.VERTICAL)
