@@ -1489,9 +1489,10 @@ class Plugin(BasePlugin):
             if not isinstance(decor, ViewGroup): return
 
             hotspot = View(activity)
-            lp = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, _dp(56))
-            lp.gravity = int(Gravity.TOP)
-            lp.topMargin = _statusbar_pad()
+            lp = FrameLayout.LayoutParams(_dp(88), _dp(88))
+            lp.gravity = int(Gravity.END | Gravity.BOTTOM)
+            lp.rightMargin = _dp(8)
+            lp.bottomMargin = _dp(8)
             hotspot.setLayoutParams(lp)
             hotspot.setBackgroundColor(_c("#00000000"))
             hotspot.setAlpha(0.01)
@@ -1524,8 +1525,7 @@ class Plugin(BasePlugin):
                     except Exception: pass
                     return True
                 if act in (int(MotionEvent.ACTION_UP), int(MotionEvent.ACTION_CANCEL), int(MotionEvent.ACTION_MOVE)):
-                    if act != int(MotionEvent.ACTION_MOVE):
-                        self._hotspot_press_armed = False
+                    self._hotspot_press_armed = False
                     return True
                 return False
 
