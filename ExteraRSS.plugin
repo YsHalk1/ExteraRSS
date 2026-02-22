@@ -1386,6 +1386,11 @@ class Plugin(BasePlugin):
             self._sub_exclude_filters = [_norm_sub(x) for x in sub_ex_arr if _norm_sub(x)]
         except Exception:
             pass
+        try:
+            raw_hist = self.get_setting("history_posts_limit", str(int(self._history_posts)))
+        except Exception:
+            raw_hist = self._history_posts
+        self._history_posts = _clamp_history_posts(raw_hist)
         try: raw_corner = self.get_setting("ui_corner_scale", f"{self._corner_scale:.2f}")
         except Exception: raw_corner = self._corner_scale
         self._set_corner_scale(raw_corner, persist=False)
@@ -3335,18 +3340,10 @@ class Plugin(BasePlugin):
         if idx >= len(image_list): idx = len(image_list) - 1
         state = {"idx": idx}
 
-        zoom_out_btn = self._top_button(activity, " − ", lambda: None)
-        zoom_in_btn = self._top_button(activity, " + ", lambda: None)
-        zoom_reset_btn = self._top_button(activity, _tr("100%", "100%"), lambda: None)
         image_pos_tv = TextView(activity)
         image_pos_tv.setTextColor(_c(COLOR_TEXT_SEC))
         image_pos_tv.setTextSize(13)
-        zoom_row.addView(zoom_out_btn)
-        zoom_row.addView(self._spacer_h(activity, 8))
-        zoom_row.addView(zoom_reset_btn)
-        zoom_row.addView(self._spacer_h(activity, 8))
-        zoom_row.addView(zoom_in_btn)
-        zoom_row.addView(self._spacer_h(activity, 10))
+        zoom_row.addView(TextView(activity), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
         zoom_row.addView(image_pos_tv)
 
         iv = ImageView(activity)
@@ -3460,7 +3457,10 @@ class Plugin(BasePlugin):
                     d = _dist(ev)
                     bd = float(zoom.get("base_dist", 0.0))
                     if bd > 0.0 and d > 0.0:
-                        _apply_zoom(float(zoom.get("scale", 1.0)) * (d / bd))
+                        cur_sc = float(zoom.get("scale", 1.0))
+                        tgt_sc = cur_sc * (d / bd)
+                        smooth_sc = cur_sc + (tgt_sc - cur_sc) * 0.35
+                        _apply_zoom(smooth_sc)
                         zoom["base_dist"] = d
                     return True
                 if pcount == 1 and act == int(MotionEvent.ACTION_DOWN):
@@ -3515,16 +3515,6 @@ class Plugin(BasePlugin):
                 return False
             return bool(float(zoom.get("scale", 1.0)) > 1.0)
 
-        def _zoom_step(delta: float):
-            _apply_zoom(float(zoom.get("scale", 1.0)) + delta)
-
-        try: zoom_out_btn.setOnClickListener(OnClickListener(lambda _v: _zoom_step(-0.25)))
-        except Exception: pass
-        try: zoom_in_btn.setOnClickListener(OnClickListener(lambda _v: _zoom_step(0.25)))
-        except Exception: pass
-        try: zoom_reset_btn.setOnClickListener(OnClickListener(lambda _v: _apply_zoom(1.0)))
-        except Exception: pass
-
         try: iv.setOnTouchListener(_OnTouchListener(_on_img_touch))
         except Exception: pass
         
@@ -3541,11 +3531,7 @@ class Plugin(BasePlugin):
 
         try:
             overlay.setAlpha(0.0)
-            iv.setScaleX(0.8); iv.setScaleY(0.8)
             overlay.animate().alpha(1.0).setDuration(250).start()
-            anim = iv.animate().scaleX(1.0).scaleY(1.0).setDuration(350)
-            anim.setInterpolator(OvershootInterpolator(1.0))
-            anim.start()
         except Exception: pass
 
     def _close_image_screen(self, animated: bool):
