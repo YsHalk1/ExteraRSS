@@ -3556,27 +3556,57 @@ class Plugin(BasePlugin):
     def _load_image_into(self, url: str, iv: ImageView, quick_preview: bool = False, loading_label: Optional[TextView] = None):
         url = _upgrade_image_url(url)
         if not url: return
+
+        def start_loading_pulse(lbl: Optional[TextView]):
+            if lbl is None:
+                return
+            def _tick():
+                try:
+                    if int(lbl.getVisibility()) != int(View.VISIBLE):
+                        return
+                    try:
+                        lbl.animate().alpha(0.42).setDuration(320).withEndAction(
+                            Runnable(lambda: lbl.animate().alpha(1.0).setDuration(320).start())
+                        ).start()
+                    except Exception:
+                        pass
+                    try:
+                        AndroidUtilities.runOnUIThread(Runnable(_tick), 700)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            run_on_ui_thread(_tick)
+
         with self._img_cache_lock: bmp = self._img_cache.get(url)
         if bmp is not None:
             try: iv.setImageBitmap(bmp); iv.setVisibility(View.VISIBLE)
             except Exception: pass
             if loading_label is not None:
-                try: loading_label.setVisibility(View.GONE)
+                try:
+                    loading_label.setAlpha(1.0)
+                    loading_label.setVisibility(View.GONE)
                 except Exception: pass
+            try:
+                iv.setAlpha(1.0)
+                iv.clearColorFilter()
+            except Exception: pass
             return
 
         if loading_label is not None:
             try:
-                loading_label.setText(_tr("Загрузка изображений…", "Loading images…"))
+                loading_label.setText(_tr("Загрузка превью…", "Loading preview…"))
+                loading_label.setAlpha(1.0)
                 loading_label.setVisibility(View.VISIBLE)
             except Exception:
                 pass
+            start_loading_pulse(loading_label)
 
         def decode_preview(data: bytes):
             try:
                 opts_p = BitmapFactory.Options()
                 opts_p.inPreferredConfig = Bitmap.Config.RGB_565 if Bitmap is not None else None
-                opts_p.inSampleSize = 4
+                opts_p.inSampleSize = 12
                 return BitmapFactory.decodeByteArray(data, 0, len(data), opts_p)
             except Exception:
                 return None
@@ -3609,7 +3639,16 @@ class Plugin(BasePlugin):
                                 iv.setImageBitmap(prev)
                                 iv.setVisibility(View.VISIBLE)
                                 iv.setAlpha(0.0)
-                                iv.animate().alpha(1.0).setDuration(180).start()
+                                try:
+                                    iv.setColorFilter(_c("#7AFFFFFF"))
+                                except Exception:
+                                    pass
+                                iv.animate().alpha(0.84).setDuration(180).start()
+                                if loading_label is not None:
+                                    try:
+                                        loading_label.setText(_tr("Догружаем оригинал…", "Loading full quality…"))
+                                    except Exception:
+                                        pass
                             except Exception: pass
                         run_on_ui_thread(ui_prev)
 
@@ -3626,10 +3665,14 @@ class Plugin(BasePlugin):
                         iv.setImageBitmap(bmp2)
                         iv.setVisibility(View.VISIBLE)
                         iv.setAlpha(0.0)
+                        try: iv.clearColorFilter()
+                        except Exception: pass
                         iv.animate().alpha(1.0).setDuration(260).start()
                     except Exception: pass
                     if loading_label is not None:
-                        try: loading_label.setVisibility(View.GONE)
+                        try:
+                            loading_label.setAlpha(1.0)
+                            loading_label.setVisibility(View.GONE)
                         except Exception: pass
                 run_on_ui_thread(ui)
             except Exception:
