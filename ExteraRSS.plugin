@@ -1098,6 +1098,9 @@ class Plugin(BasePlugin):
         self._pencil_touch_listener = None
         self._pencil_touch_token = 0
         self._pencil_press_armed = False
+        self._pencil_down_x = 0.0
+        self._pencil_down_y = 0.0
+        self._pencil_touch_slop = 0
 
         self._source_filter: str = ""
         self._category_filter: str = ""
@@ -1625,7 +1628,17 @@ class Plugin(BasePlugin):
                     self._pencil_press_armed = True
                     self._pencil_touch_token += 1
                     token = int(self._pencil_touch_token)
-                    log("[RSS] pencil hold: ACTION_DOWN armed")
+                    try:
+                        self._pencil_down_x = float(ev.getRawX())
+                        self._pencil_down_y = float(ev.getRawY())
+                    except Exception:
+                        self._pencil_down_x = 0.0
+                        self._pencil_down_y = 0.0
+                    try:
+                        self._pencil_touch_slop = int(ViewConfiguration.get(pencil.getContext()).getScaledTouchSlop())
+                    except Exception:
+                        self._pencil_touch_slop = _dp(12)
+                    log(f"[RSS] pencil hold: ACTION_DOWN armed slop={self._pencil_touch_slop}")
                     def trigger():
                         try:
                             if token != int(self._pencil_touch_token): return
@@ -1642,7 +1655,19 @@ class Plugin(BasePlugin):
                     try: AndroidUtilities.runOnUIThread(Runnable(trigger), 500)
                     except Exception: pass
                     return False
-                if act in (int(MotionEvent.ACTION_UP), int(MotionEvent.ACTION_CANCEL), int(MotionEvent.ACTION_MOVE)):
+                if act == int(MotionEvent.ACTION_MOVE):
+                    try:
+                        dx = abs(float(ev.getRawX()) - float(self._pencil_down_x))
+                        dy = abs(float(ev.getRawY()) - float(self._pencil_down_y))
+                        sl = max(1, int(self._pencil_touch_slop or 0))
+                        if dx > sl or dy > sl:
+                            if self._pencil_press_armed:
+                                log(f"[RSS] pencil hold: disarm move dx={dx:.1f} dy={dy:.1f} slop={sl}")
+                            self._pencil_press_armed = False
+                    except Exception:
+                        pass
+                    return False
+                if act in (int(MotionEvent.ACTION_UP), int(MotionEvent.ACTION_CANCEL)):
                     if self._pencil_press_armed:
                         log(f"[RSS] pencil hold: disarm action={act}")
                     self._pencil_press_armed = False
@@ -1669,6 +1694,9 @@ class Plugin(BasePlugin):
         self._pencil_hook_view = None
         self._pencil_touch_listener = None
         self._pencil_press_armed = False
+        self._pencil_down_x = 0.0
+        self._pencil_down_y = 0.0
+        self._pencil_touch_slop = 0
 
     # ---------- lifecycle ----------
     def on_plugin_load(self):
