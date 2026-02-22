@@ -12,6 +12,10 @@ from ui.settings import Header, Divider, Switch, Text
 
 from android_utils import log, run_on_ui_thread, OnClickListener
 from client_utils import get_last_fragment
+try:
+    from hook_utils import get_private_field
+except Exception:
+    get_private_field = None
 
 from org.telegram.messenger import AndroidUtilities, ApplicationLoader
 
@@ -70,6 +74,17 @@ except ImportError:
             return bool(self._fn(v, key_code, event))
 
 try:
+    from android_utils import OnLongClickListener as _OnLongClickListener
+except ImportError:
+    class _OnLongClickListener(dynamic_proxy(View.OnLongClickListener)):
+        def __init__(self, fn):
+            super().__init__()
+            self._fn = fn
+
+        def onLongClick(self, v):
+            return bool(self._fn(v))
+
+try:
     from android_utils import OnSeekBarChangeListener as _OnSeekBarChangeListener
 except ImportError:
     try:
@@ -123,6 +138,8 @@ _UI_SCALE_MAX = 1.35
 _UI_SCALE = 1.00
 _UI_PAD_MIN = 0
 _UI_PAD_MAX = 30
+_CORNER_SCALE_MIN = 0.60
+_CORNER_SCALE_MAX = 1.80
 
 COLOR_BG = "#FF060608"
 COLOR_CARD = "#FF121216"
@@ -131,6 +148,67 @@ COLOR_ACCENT = "#FF7E57C2"  # Deep Violet
 COLOR_TEXT_PR = "#FFFFFFFF"
 COLOR_TEXT_SEC = "#FF8A8A93"
 COLOR_OVERLAY = "#D9060608" # Translucent glass
+
+
+def _clamp_corner_scale(v: Any) -> float:
+    try:
+        x = float(v)
+    except Exception:
+        x = 1.00
+    if x < _CORNER_SCALE_MIN:
+        x = _CORNER_SCALE_MIN
+    if x > _CORNER_SCALE_MAX:
+        x = _CORNER_SCALE_MAX
+    return x
+
+
+def _norm_accent_hex(v: Any) -> str:
+    s = str(v or "").strip().upper()
+    if not s:
+        return "#FF7E57C2"
+    if not s.startswith("#"):
+        s = "#" + s
+    if len(s) == 7:
+        s = "#FF" + s[1:]
+    if len(s) != 9:
+        return "#FF7E57C2"
+    try:
+        int(s[1:], 16)
+    except Exception:
+        return "#FF7E57C2"
+    return s
+
+
+def _mix_hex(c1: Any, c2: Any, ratio: float) -> str:
+    a = _norm_accent_hex(c1)
+    b = _norm_accent_hex(c2)
+    try:
+        r = float(ratio)
+    except Exception:
+        r = 0.5
+    if r < 0.0: r = 0.0
+    if r > 1.0: r = 1.0
+    try:
+        a_a = int(a[1:3], 16); a_r = int(a[3:5], 16); a_g = int(a[5:7], 16); a_b = int(a[7:9], 16)
+        b_a = int(b[1:3], 16); b_r = int(b[3:5], 16); b_g = int(b[5:7], 16); b_b = int(b[7:9], 16)
+        o_a = int(round(a_a * (1.0 - r) + b_a * r))
+        o_r = int(round(a_r * (1.0 - r) + b_r * r))
+        o_g = int(round(a_g * (1.0 - r) + b_g * r))
+        o_b = int(round(a_b * (1.0 - r) + b_b * r))
+        return f"#{o_a:02X}{o_r:02X}{o_g:02X}{o_b:02X}"
+    except Exception:
+        return a
+
+
+def _with_alpha(c: Any, alpha: int) -> str:
+    base = _norm_accent_hex(c)
+    try:
+        a = int(alpha)
+    except Exception:
+        a = 255
+    if a < 0: a = 0
+    if a > 255: a = 255
+    return f"#{a:02X}{base[3:]}"
 
 def _clamp_ui_scale(v: Any) -> float:
     try:
@@ -153,6 +231,37 @@ def _clamp_ui_pad(v: Any) -> int:
     if x > _UI_PAD_MAX:
         x = _UI_PAD_MAX
     return x
+
+
+def _clamp_bg_refresh_seconds(v: Any) -> int:
+    try:
+        x = int(round(float(v)))
+    except Exception:
+        x = 180
+    if x < 10:
+        x = 10
+    if x > 1800:
+        x = 1800
+    return x
+
+
+def _clamp_history_posts(v: Any) -> int:
+    try:
+        x = int(round(float(v)))
+    except Exception:
+        x = 20
+    if x < 1:
+        x = 1
+    if x > 100:
+        x = 100
+    return x
+
+
+def _sub_to_label(sub: str) -> str:
+    s = _norm_sub(sub)
+    if s.startswith("tguser:"):
+        return "@" + s.split(":", 1)[1]
+    return s
 
 def _is_ru_locale() -> bool:
     try:
@@ -1004,9 +1113,20 @@ class Plugin(BasePlugin):
         self._mini_overlay: Optional[FrameLayout] = None
         self._mini_link: str = ""
         self._back_tracking_paused = False
+        self._pencil_hook_view: Optional[View] = None
+        self._pencil_touch_listener = None
+        self._pencil_long_click_listener = None
+        self._pencil_touch_token = 0
+        self._pencil_press_armed = False
+        self._pencil_down_x = 0.0
+        self._pencil_down_y = 0.0
+        self._pencil_touch_slop = 0
 
         self._source_filter: str = ""
         self._category_filter: str = ""
+        self._source_exclude_filters: List[str] = []
+        self._category_exclude_filters: List[str] = []
+        self._sub_exclude_filters: List[str] = []
         self._source_btn: Optional[TextView] = None
         self._nav_feed_btn: Optional[TextView] = None
         self._nav_subs_btn: Optional[TextView] = None
@@ -1022,26 +1142,70 @@ class Plugin(BasePlugin):
 
         self._ui_scale = _clamp_ui_scale(self.get_setting("ui_scale", "1.00"))
         self._ui_pad = _clamp_ui_pad(self.get_setting("ui_pad", "16"))
+        self._corner_scale = _clamp_corner_scale(self.get_setting("ui_corner_scale", "1.00"))
+        self._accent_color = _norm_accent_hex(self.get_setting("ui_accent", COLOR_ACCENT))
+        self._history_posts = _clamp_history_posts(self.get_setting("history_posts_limit", "20"))
         global _UI_SCALE
         _UI_SCALE = float(self._ui_scale)
         self._ui_seek_listener = None
         self._ui_pad_seek_listener = None
+        self._history_seek_listener = None
+        self._corner_seek_listener = None
+        self._accent_seek_listener = None
         self._suppress_open_refresh_once = False
         self._bg_thread_running = False
+        self._unread_new_posts = max(0, int(self.get_setting("rss_unread_new", "0") or 0))
+        self._img_preview_mode = str(self.get_setting("feed_img_preview_mode", "compact") or "compact").strip().lower()
+        self._img_layout_mode = str(self.get_setting("img_layout_mode", self.get_setting("feed_img_layout_mode", self.get_setting("post_img_layout_mode", "primary"))) or "primary").strip().lower()
+        src_ex_raw = self.get_setting("source_exclude_filters", "")
+        if not src_ex_raw:
+            src_old = str(self.get_setting("source_exclude_filter", "") or "")
+            self._source_exclude_filters = ([src_old] if src_old else [])
+        else:
+            src_arr = _safe_json_load(src_ex_raw, [])
+            self._source_exclude_filters = [str(x) for x in src_arr if str(x or "").strip()]
+
+        cat_ex_raw = self.get_setting("category_exclude_filters", "")
+        if not cat_ex_raw:
+            cat_old = _norm_category(self.get_setting("category_exclude_filter", "") or "")
+            self._category_exclude_filters = ([cat_old] if cat_old else [])
+        else:
+            cat_arr = _safe_json_load(cat_ex_raw, [])
+            self._category_exclude_filters = [_norm_category(x) for x in cat_arr if _norm_category(x)]
+        sub_ex_raw = self.get_setting("sub_exclude_filters", "")
+        sub_ex_arr = _safe_json_load(sub_ex_raw, []) if sub_ex_raw else []
+        self._sub_exclude_filters = [_norm_sub(x) for x in sub_ex_arr if _norm_sub(x)]
+        if self._img_preview_mode not in ("compact", "full"):
+            self._img_preview_mode = "compact"
+        if self._img_layout_mode not in ("primary", "grid"):
+            self._img_layout_mode = "primary"
+        self._refresh_fade_token = 0
+        self._bg_minutes_seek_listener = None
 
     # ---- Animations Helpers ----
+    def _reset_press_state(self, v: Optional[View]):
+        if v is None: return
+        try: v.animate().cancel()
+        except Exception: pass
+        try: v.setPressed(False)
+        except Exception: pass
+        try: v.setScaleX(1.0)
+        except Exception: pass
+        try: v.setScaleY(1.0)
+        except Exception: pass
+
     def _bounce_anim(self, v: View):
+        self._reset_press_state(v)
         try:
             v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
         except Exception:
             pass
         try:
-            v.animate().cancel()
-            v.animate().scaleX(0.92).scaleY(0.92).setDuration(80).withEndAction(
-                Runnable(lambda: v.animate().scaleX(1.0).scaleY(1.0).setDuration(120).start())
+            v.animate().scaleX(0.93).scaleY(0.93).setDuration(70).withEndAction(
+                Runnable(lambda: v.animate().scaleX(1.0).scaleY(1.0).setDuration(130).withEndAction(Runnable(lambda: self._reset_press_state(v))).start())
             ).start()
         except Exception:
-            pass
+            self._reset_press_state(v)
 
     def _slide_up_enter(self, overlay: View, content: View):
         try:
@@ -1087,22 +1251,26 @@ class Plugin(BasePlugin):
     def _bg_rounded(self, fill_hex: str, stroke_hex: str = "#00000000", stroke_dp: float = 0.0, radius_dp: float = CORNER_RADIUS_DP):
         bg = GradientDrawable()
         bg.setColor(_c(fill_hex))
-        bg.setCornerRadius(float(_dp(radius_dp)))
+        bg.setCornerRadius(float(_dp(radius_dp * float(self._corner_scale))))
         if stroke_dp and stroke_dp > 0:
             bg.setStroke(_dp(stroke_dp), _c(stroke_hex))
         return bg
 
     def _bg_important_gradient(self):
         try:
+            accent_soft = _with_alpha(self._accent(), 110)
+            grad_top = _mix_hex(accent_soft, "#FF2A1A3A", 0.62)
+            grad_bottom = _mix_hex(accent_soft, "#FF1A1224", 0.80)
+            grad_stroke = _mix_hex(accent_soft, "#FF4A2555", 0.45)
             bg = GradientDrawable(
                 GradientDrawable.Orientation.TL_BR,
-                [_c("#2A1A3A"), _c("#1A1224")]
+                [_c(grad_top), _c(grad_bottom)]
             )
-            bg.setCornerRadius(float(_dp(CORNER_RADIUS_DP)))
-            bg.setStroke(_dp(0.5), _c("#4A2555"))
+            bg.setCornerRadius(float(_dp(CORNER_RADIUS_DP * float(self._corner_scale))))
+            bg.setStroke(_dp(0.5), _c(grad_stroke))
             return bg
         except Exception:
-            return self._bg_rounded("#1A1224", "#4A2555", 0.5, radius_dp=CORNER_RADIUS_DP)
+            return self._bg_rounded(_mix_hex(_with_alpha(self._accent(), 110), "#FF1A1224", 0.75), _mix_hex(_with_alpha(self._accent(), 110), "#FF4A2555", 0.45), 0.5, radius_dp=CORNER_RADIUS_DP)
 
     def _bg_pill(self, fill_hex: str, stroke_hex: str = "#00000000", stroke_dp: float = 0.0):
         bg = GradientDrawable()
@@ -1146,6 +1314,76 @@ class Plugin(BasePlugin):
             try: self.set_setting("ui_pad", str(int(val)))
             except Exception: pass
 
+    def _set_img_preview_mode(self, mode: Any, persist: bool = True):
+        m = str(mode or "compact").strip().lower()
+        if m not in ("compact", "full"):
+            m = "compact"
+        self._img_preview_mode = m
+        if persist:
+            try: self.set_setting("feed_img_preview_mode", m)
+            except Exception: pass
+
+    def _set_img_layout_mode(self, mode: Any, persist: bool = True):
+        m = str(mode or "primary").strip().lower()
+        if m not in ("primary", "grid"):
+            m = "primary"
+        self._img_layout_mode = m
+        if persist:
+            try:
+                self.set_setting("img_layout_mode", m)
+            except Exception:
+                pass
+
+    def _apply_img_preview_mode_and_reopen(self, mode: str):
+        m = str(mode or "compact").strip().lower()
+        if m not in ("compact", "full"):
+            m = "compact"
+        if m == self._img_preview_mode: return
+        self._set_img_preview_mode(m, persist=True)
+        if self._overlay is None: return
+        mode_now = self._mode
+        fragment = get_last_fragment()
+        self._suppress_open_refresh_once = True
+        self._close(animated=False)
+        if fragment:
+            self._open(fragment)
+            if mode_now != "feed": self._set_mode(mode_now)
+
+    def _apply_img_layout_mode_and_reopen(self, mode: str):
+        m = str(mode or "primary").strip().lower()
+        if m not in ("primary", "grid"):
+            m = "primary"
+        if m == self._img_layout_mode:
+            return
+        self._set_img_layout_mode(m, persist=True)
+        if self._overlay is None:
+            return
+        mode_now = self._mode
+        fragment = get_last_fragment()
+        self._suppress_open_refresh_once = True
+        self._close(animated=False)
+        if fragment:
+            self._open(fragment)
+            if mode_now != "feed":
+                self._set_mode(mode_now)
+
+    def _set_corner_scale(self, value: Any, persist: bool = True):
+        val = _clamp_corner_scale(value)
+        self._corner_scale = float(val)
+        if persist:
+            try: self.set_setting("ui_corner_scale", f"{val:.2f}")
+            except Exception: pass
+
+    def _set_accent_color(self, value: Any, persist: bool = True):
+        val = _norm_accent_hex(value)
+        self._accent_color = val
+        if persist:
+            try: self.set_setting("ui_accent", val)
+            except Exception: pass
+
+    def _accent(self) -> str:
+        return str(self._accent_color or COLOR_ACCENT)
+
     def _reload_ui_scale_from_settings(self):
         try: raw = self.get_setting("ui_scale", f"{self._ui_scale:.2f}")
         except Exception: raw = self._ui_scale
@@ -1153,6 +1391,47 @@ class Plugin(BasePlugin):
         try: raw_pad = self.get_setting("ui_pad", str(int(self._ui_pad)))
         except Exception: raw_pad = self._ui_pad
         self._set_ui_pad(raw_pad, persist=False)
+        try: raw_mode = self.get_setting("feed_img_preview_mode", self._img_preview_mode)
+        except Exception: raw_mode = self._img_preview_mode
+        self._set_img_preview_mode(raw_mode, persist=False)
+        try: raw_layout = self.get_setting("img_layout_mode", self._img_layout_mode)
+        except Exception: raw_layout = self._img_layout_mode
+        self._set_img_layout_mode(raw_layout, persist=False)
+        try:
+            src_ex_raw = self.get_setting("source_exclude_filters", "")
+            if src_ex_raw:
+                src_arr = _safe_json_load(src_ex_raw, [])
+                self._source_exclude_filters = [str(x) for x in src_arr if str(x or "").strip()]
+            else:
+                src_old = str(self.get_setting("source_exclude_filter", "") or "")
+                self._source_exclude_filters = ([src_old] if src_old else [])
+        except Exception: pass
+        try:
+            cat_ex_raw = self.get_setting("category_exclude_filters", "")
+            if cat_ex_raw:
+                cat_arr = _safe_json_load(cat_ex_raw, [])
+                self._category_exclude_filters = [_norm_category(x) for x in cat_arr if _norm_category(x)]
+            else:
+                cat_old = _norm_category(self.get_setting("category_exclude_filter", "") or "")
+                self._category_exclude_filters = ([cat_old] if cat_old else [])
+        except Exception: pass
+        try:
+            sub_ex_raw = self.get_setting("sub_exclude_filters", "")
+            sub_ex_arr = _safe_json_load(sub_ex_raw, []) if sub_ex_raw else []
+            self._sub_exclude_filters = [_norm_sub(x) for x in sub_ex_arr if _norm_sub(x)]
+        except Exception:
+            pass
+        try:
+            raw_hist = self.get_setting("history_posts_limit", str(int(self._history_posts)))
+        except Exception:
+            raw_hist = self._history_posts
+        self._history_posts = _clamp_history_posts(raw_hist)
+        try: raw_corner = self.get_setting("ui_corner_scale", f"{self._corner_scale:.2f}")
+        except Exception: raw_corner = self._corner_scale
+        self._set_corner_scale(raw_corner, persist=False)
+        try: raw_accent = self.get_setting("ui_accent", self._accent_color)
+        except Exception: raw_accent = self._accent_color
+        self._set_accent_color(raw_accent, persist=False)
 
     def _ui_scale_percent(self) -> int:
         try: return int(round(float(self._ui_scale) * 100.0))
@@ -1198,10 +1477,349 @@ class Plugin(BasePlugin):
             self._open(fragment)
             if mode_now != "feed": self._set_mode(mode_now)
 
+    def _corner_scale_percent(self) -> int:
+        try: return int(round(float(self._corner_scale) * 100.0))
+        except Exception: return 100
+
+    def _corner_scale_to_progress(self, value: float) -> int:
+        return int(round((_clamp_corner_scale(value) - _CORNER_SCALE_MIN) * 100.0))
+
+    def _progress_to_corner_scale(self, progress: int) -> float:
+        return _clamp_corner_scale(_CORNER_SCALE_MIN + float(progress) / 100.0)
+
+    def _apply_corner_scale_and_reopen(self, value: float):
+        old = float(self._corner_scale)
+        new = _clamp_corner_scale(value)
+        if abs(new - old) < 0.004: return
+        self._set_corner_scale(new, persist=True)
+        if self._overlay is None: return
+        mode_now = self._mode
+        fragment = get_last_fragment()
+        self._suppress_open_refresh_once = True
+        self._close(animated=False)
+        if fragment:
+            self._open(fragment)
+            if mode_now != "feed": self._set_mode(mode_now)
+
+    def _accent_palette(self) -> List[str]:
+        return [
+            "#FF7E57C2", "#FF9B59B6", "#FFFF5FA2", "#FFFF6B6B", "#FFFF8C42", "#FFFFA726", "#FFFFC107", "#FF7ED957",
+            "#FF2BC7B0", "#FF00BCD4", "#FF4F9DFF", "#FF3F51B5", "#FF607D8B", "#FFFFFFFF"
+        ]
+
+    def _accent_to_progress(self, color: str) -> int:
+        palette = self._accent_palette()
+        c = _norm_accent_hex(color)
+        try:
+            return palette.index(c)
+        except Exception:
+            return 0
+
+    def _progress_to_accent(self, progress: int) -> str:
+        palette = self._accent_palette()
+        idx = max(0, min(len(palette) - 1, int(progress)))
+        return palette[idx]
+
+    def _apply_accent_and_reopen(self, color: str):
+        new = _norm_accent_hex(color)
+        if new == self._accent(): return
+        self._set_accent_color(new, persist=True)
+        if self._overlay is None:
+            self._render()
+            return
+        mode_now = self._mode
+        fragment = get_last_fragment()
+        self._suppress_open_refresh_once = True
+        self._close(animated=False)
+        if fragment:
+            self._open(fragment)
+            if mode_now != "feed": self._set_mode(mode_now)
+
+    def _set_unread_count(self, value: int, persist: bool = True):
+        try: n = max(0, int(value))
+        except Exception: n = 0
+        self._unread_new_posts = n
+        if persist:
+            try: self.set_setting("rss_unread_new", str(n))
+            except Exception: pass
+        self._install_drawer_item()
+
+    def _is_menu_fragment(self, fragment) -> bool:
+        try:
+            if fragment is None: return False
+            name = str(fragment.getClass().getSimpleName() or "")
+            low = name.lower()
+            if "chat" in low: return False
+            if "dialogs" in low or "launch" in low: return True
+            return True
+        except Exception:
+            return False
+
+    def _pencil_debug_tag(self, v: Optional[View]) -> str:
+        if v is None: return "<none>"
+        try: cls = str(v.getClass().getSimpleName() or "View")
+        except Exception: cls = "View"
+        parts = [cls]
+        try:
+            rid = int(v.getId())
+            if rid > 0:
+                try:
+                    name = str(v.getResources().getResourceEntryName(rid) or "")
+                    if name: parts.append(f"id={name}")
+                except Exception:
+                    parts.append(f"id#{rid}")
+        except Exception:
+            pass
+
+    def _apply_history_limit(self, value: Any):
+        try:
+            val = _clamp_history_posts(value)
+            self._history_posts = val
+            try: self.set_setting("history_posts_limit", str(val))
+            except Exception: pass
+            self._render()
+        except Exception:
+            pass
+        try:
+            desc = str(v.getContentDescription() or "").strip()
+            if desc: parts.append(f"desc='{desc}'")
+        except Exception:
+            pass
+        try:
+            x = int(v.getLeft()); y = int(v.getTop()); w = int(v.getWidth()); h = int(v.getHeight())
+            parts.append(f"xywh={x},{y},{w},{h}")
+        except Exception:
+            pass
+        return " ".join(parts)
+
+    def _looks_like_pencil_action(self, v: View, root_w: int, root_h: int) -> bool:
+        try:
+            if v is None: return False
+            w = int(v.getWidth()); h = int(v.getHeight())
+            if w <= 0 or h <= 0: return False
+            x = int(v.getLeft()); y = int(v.getTop())
+            if root_w > 0 and (x + w) < int(root_w * 0.65): return False
+            if root_h > 0 and y < int(root_h * 0.45): return False
+            text = ""
+            try: text += " " + str(v.getContentDescription() or "")
+            except Exception: pass
+            try: text += " " + str(v.getClass().getSimpleName() or "")
+            except Exception: pass
+            try:
+                rid = int(v.getId())
+                if rid > 0:
+                    try: text += " " + str(v.getResources().getResourceEntryName(rid) or "")
+                    except Exception: pass
+            except Exception:
+                pass
+            low = text.lower()
+            keys = ("pencil", "compose", "new", "create", "write", "edit", "floating", "fab", "message", "карандаш", "создать", "напис")
+            if any(k in low for k in keys): return True
+            return bool(isinstance(v, ImageView) and min(w, h) >= _dp(36) and max(w, h) <= _dp(90))
+        except Exception:
+            return False
+
+    def _find_pencil_view_from_fragment(self, fragment) -> Optional[View]:
+        try:
+            if fragment is None or get_private_field is None:
+                return None
+            keys = ("floatingButtonContainer", "floatingButton2Container", "floatingButton")
+            for key in keys:
+                try:
+                    v = get_private_field(fragment, key)
+                except Exception:
+                    v = None
+                if isinstance(v, View):
+                    log(f"[RSS] pencil hook field hit: {key} -> {self._pencil_debug_tag(v)}")
+                    return v
+            log("[RSS] pencil hook field scan: no floating button fields")
+            return None
+        except Exception as e:
+            log(f"[RSS] pencil hook field scan error: {e}")
+            return None
+
+    def _find_pencil_view(self, root) -> Optional[View]:
+        try:
+            if not isinstance(root, ViewGroup): return None
+            rw = int(root.getWidth()); rh = int(root.getHeight())
+            stack = [root]
+            candidates = []
+            while stack:
+                cur = stack.pop()
+                if isinstance(cur, ViewGroup):
+                    try: cnt = int(cur.getChildCount())
+                    except Exception: cnt = 0
+                    for i in range(cnt):
+                        try: stack.append(cur.getChildAt(i))
+                        except Exception: pass
+                if cur is root: continue
+                try:
+                    if int(cur.getVisibility()) != int(View.VISIBLE):
+                        continue
+                except Exception:
+                    pass
+                if self._looks_like_pencil_action(cur, rw, rh):
+                    candidates.append(cur)
+            if not candidates:
+                log("[RSS] pencil hook: no candidates found")
+                return None
+            try:
+                candidates.sort(key=lambda v: (-(int(v.getLeft()) + int(v.getWidth())), -(int(v.getTop()) + int(v.getHeight())), -int(v.getWidth()) * int(v.getHeight())))
+            except Exception:
+                pass
+            top = candidates[0]
+            for i, c in enumerate(candidates[:5]):
+                log(f"[RSS] pencil hook candidate[{i}]: {self._pencil_debug_tag(c)}")
+            return top
+        except Exception as e:
+            log(f"[RSS] pencil hook find error: {e}")
+            return None
+
+    def _install_pencil_hook_view_trigger(self):
+        try:
+            if self._pencil_hook_view is not None:
+                return
+            fragment = get_last_fragment()
+            if not self._is_menu_fragment(fragment):
+                return
+            activity = fragment.getParentActivity()
+            if not activity: return
+            decor = activity.getWindow().getDecorView()
+            if not isinstance(decor, ViewGroup): return
+
+            pencil = self._find_pencil_view_from_fragment(fragment)
+            if pencil is None:
+                pencil = self._find_pencil_view(decor)
+            if pencil is None:
+                log("[RSS] pencil hook: target view not found")
+                return
+
+            try:
+                frag_name = str(fragment.getClass().getSimpleName() or "")
+            except Exception:
+                frag_name = ""
+            log(f"[RSS] pencil hook attached ({frag_name}): {self._pencil_debug_tag(pencil)}")
+
+            def on_touch(_v, ev):
+                try:
+                    raw_act = int(ev.getAction())
+                    try: act = int(ev.getActionMasked())
+                    except Exception: act = raw_act
+                except Exception:
+                    return False
+                if act == int(MotionEvent.ACTION_DOWN):
+                    self._pencil_press_armed = True
+                    self._pencil_touch_token += 1
+                    token = int(self._pencil_touch_token)
+                    try:
+                        self._pencil_down_x = float(ev.getRawX())
+                        self._pencil_down_y = float(ev.getRawY())
+                    except Exception:
+                        self._pencil_down_x = 0.0
+                        self._pencil_down_y = 0.0
+                    try:
+                        self._pencil_touch_slop = int(ViewConfiguration.get(pencil.getContext()).getScaledTouchSlop())
+                    except Exception:
+                        self._pencil_touch_slop = _dp(12)
+                    log(f"[RSS] pencil hold: ACTION_DOWN armed slop={self._pencil_touch_slop}")
+                    def trigger():
+                        try:
+                            if token != int(self._pencil_touch_token): return
+                            if not self._pencil_press_armed: return
+                            frag = get_last_fragment()
+                            if not self._is_menu_fragment(frag): return
+                            self._pencil_press_armed = False
+                            log("[RSS] pencil hold: 500ms trigger fired")
+                            try: pencil.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                            except Exception: pass
+                            self._open(frag)
+                        except Exception as e:
+                            log(f"[RSS] pencil hold trigger error: {e}")
+                    try: AndroidUtilities.runOnUIThread(Runnable(trigger), 500)
+                    except Exception: pass
+                    return False
+                if act == int(MotionEvent.ACTION_MOVE):
+                    try:
+                        dx = abs(float(ev.getRawX()) - float(self._pencil_down_x))
+                        dy = abs(float(ev.getRawY()) - float(self._pencil_down_y))
+                        sl = max(1, int(self._pencil_touch_slop or 0))
+                        if dx > sl or dy > sl:
+                            if self._pencil_press_armed:
+                                log(f"[RSS] pencil hold: disarm move dx={dx:.1f} dy={dy:.1f} slop={sl}")
+                            self._pencil_press_armed = False
+                    except Exception:
+                        pass
+                    return False
+                # На некоторых сборках прилетает ранний CANCEL во время удержания FAB,
+                # поэтому разоружаем только по явному UP (masked/raw).
+                up_codes = {int(MotionEvent.ACTION_UP)}
+                try:
+                    up_codes.add(int(MotionEvent.ACTION_POINTER_UP))
+                except Exception:
+                    pass
+                if act in up_codes or raw_act in up_codes:
+                    if self._pencil_press_armed:
+                        log(f"[RSS] pencil hold: disarm up action={act} raw={raw_act}")
+                    self._pencil_press_armed = False
+                    return False
+                return False
+
+            try:
+                self._pencil_touch_listener = _OnTouchListener(on_touch)
+                pencil.setOnTouchListener(self._pencil_touch_listener)
+                def on_long_click(_v):
+                    try:
+                        frag = get_last_fragment()
+                        if not self._is_menu_fragment(frag):
+                            return False
+                        self._pencil_press_armed = False
+                        log("[RSS] pencil hold: native onLongClick fired")
+                        try: pencil.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                        except Exception: pass
+                        self._open(frag)
+                        return True
+                    except Exception as e:
+                        log(f"[RSS] pencil onLongClick error: {e}")
+                        return False
+                self._pencil_long_click_listener = _OnLongClickListener(on_long_click)
+                try:
+                    pencil.setLongClickable(True)
+                except Exception:
+                    pass
+                pencil.setOnLongClickListener(self._pencil_long_click_listener)
+                self._pencil_hook_view = pencil
+            except Exception as e:
+                log(f"[RSS] pencil hook attach listener error: {e}")
+        except Exception as e:
+            log(f"[RSS] pencil hook install error: {e}")
+
+    def _remove_pencil_hook_view_trigger(self):
+        h = self._pencil_hook_view
+        if h is None: return
+        try:
+            h.setOnTouchListener(None)
+        except Exception:
+            pass
+        try:
+            h.setOnLongClickListener(None)
+        except Exception:
+            pass
+        log(f"[RSS] pencil hook detached: {self._pencil_debug_tag(h)}")
+        self._pencil_hook_view = None
+        self._pencil_touch_listener = None
+        self._pencil_long_click_listener = None
+        self._pencil_press_armed = False
+        self._pencil_down_x = 0.0
+        self._pencil_down_y = 0.0
+        self._pencil_touch_slop = 0
+
     # ---------- lifecycle ----------
     def on_plugin_load(self):
         self._reload_ui_scale_from_settings()
+        try: self._unread_new_posts = max(0, int(self.get_setting("rss_unread_new", "0") or 0))
+        except Exception: self._unread_new_posts = 0
         self._install_drawer_item()
+        run_on_ui_thread(self._install_pencil_hook_view_trigger)
         self._bg_thread_running = True
         threading.Thread(target=self._bg_worker, daemon=True).start()
 
@@ -1214,16 +1832,32 @@ class Plugin(BasePlugin):
         run_on_ui_thread(lambda: self._close_post_screen(animated=False))
         run_on_ui_thread(lambda: self._close_image_screen(animated=False))
         run_on_ui_thread(lambda: self._close_mini_overlay(animated=False))
+        run_on_ui_thread(self._remove_pencil_hook_view_trigger)
 
     # ---------- bg worker ----------
     def _bg_worker(self):
+        warmup = 20
         while self._bg_thread_running:
-            for _ in range(60 * 15):
+            step = warmup
+            warmup = 0
+            if step <= 0:
+                try:
+                    raw_sec = self.get_setting("bg_refresh_seconds", None)
+                    if raw_sec is None:
+                        raw_min = self.get_setting("bg_refresh_minutes", "3")
+                        raw_sec = int(round(float(raw_min) * 60.0))
+                    step = _clamp_bg_refresh_seconds(raw_sec)
+                except Exception:
+                    step = 180
+            for _ in range(step):
                 if not self._bg_thread_running: return
                 time.sleep(1)
-            if not self.get_setting("auto_refresh", True): continue
-            try: self._silent_refresh_check()
-            except Exception as e: log(f"[RSS] bg worker error: {e}")
+            if not self.get_setting("auto_refresh", True):
+                continue
+            try:
+                self._silent_refresh_check()
+            except Exception as e:
+                log(f"[RSS] bg worker error: {e}")
 
     def _silent_refresh_check(self):
         old_cache = self._get_cache()
@@ -1234,6 +1868,10 @@ class Plugin(BasePlugin):
         new_keys = set(str(x.get("tg_post_id") or x.get("link") or "") for x in new_cache)
         diff = {k for k in (new_keys - old_keys) if k}
         if diff:
+            if self._overlay is None:
+                self._set_unread_count(self._unread_new_posts + len(diff), persist=True)
+            else:
+                self._set_unread_count(0, persist=True)
             def show_toast():
                 try: Toast.makeText(ApplicationLoader.applicationContext, _tr(f"ExteraRSS: {len(diff)} новых постов!", f"ExteraRSS: {len(diff)} new posts!"), Toast.LENGTH_LONG).show()
                 except Exception: pass
@@ -1257,12 +1895,16 @@ class Plugin(BasePlugin):
             Text(text=_tr("Очистить кэш", "Clear cache"), icon="msg_delete", accent=False, on_click=lambda v: self._clear_cache()),
             Divider(),
             Switch(key="auto_refresh", text=_tr("Автообновление (и уведомления в фоне)", "Auto-refresh (and background notifications)"), default=True, icon="msg_autodelete"),
+            Text(text=_tr("Фон-проверка: ~каждые 3 мин", "Background check: ~every 3 min"), icon="msg_clock", accent=False),
         ]
 
     # ---------- drawer ----------
     def _install_drawer_item(self):
         try:
-            item = MenuItemData(menu_type=MenuItemType.DRAWER_MENU, text=_tr("Моя лента", "My Feed"), on_click=lambda ctx: self._open(ctx.get("fragment") or get_last_fragment()), icon="msg_list", item_id="rss_my_feed_drawer", subtext="RSS/Atom + Telegram", priority=980)
+            unread = max(0, int(self._unread_new_posts))
+            base = _tr("Моя лента", "My Feed")
+            txt = (f"{base} +{unread}") if unread > 0 else base
+            item = MenuItemData(menu_type=MenuItemType.DRAWER_MENU, text=txt, on_click=lambda ctx: self._open(ctx.get("fragment") or get_last_fragment()), icon="msg_list", item_id="rss_my_feed_drawer", subtext="RSS/Atom + Telegram", priority=980)
             self.add_menu_item(item)
         except Exception: pass
 
@@ -1354,6 +1996,7 @@ class Plugin(BasePlugin):
                     if not at_top: self._pull_armed = False
                     elif dy > float(_dp(80)) and dy > abs(dx):
                         self._pull_armed = False
+                        self._gesture_switched = True
                         try: self._main_scroll.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
                         except Exception: pass
                         self._set_refreshing_ui(True)
@@ -1433,6 +2076,8 @@ class Plugin(BasePlugin):
 
     def _set_refreshing_ui(self, val: bool):
         self._refreshing = bool(val)
+        self._refresh_fade_token += 1
+        token = int(self._refresh_fade_token)
         try:
             rb = self._refresh_bar
             if rb is None: return
@@ -1441,6 +2086,15 @@ class Plugin(BasePlugin):
                 rb.setAlpha(0.0)
                 rb.setTranslationY(float(_dp(-30)))
                 rb.animate().alpha(1.0).translationY(0.0).setDuration(250).setInterpolator(OvershootInterpolator(1.0)).start()
+                def late_fade():
+                    try:
+                        if int(self._refresh_fade_token) != token: return
+                        if not self._refreshing: return
+                        rb.animate().alpha(0.58).setDuration(260).start()
+                    except Exception:
+                        pass
+                try: AndroidUtilities.runOnUIThread(Runnable(late_fade), 2000)
+                except Exception: pass
             else:
                 anim = rb.animate().alpha(0.0).translationY(float(_dp(-30))).setDuration(200)
                 anim.withEndAction(Runnable(lambda: rb.setVisibility(View.GONE)))
@@ -1482,6 +2136,14 @@ class Plugin(BasePlugin):
     def _source_filter_options(self) -> List[str]:
         return [""] + self._available_sources()
 
+    def _sub_exclude_options(self) -> List[str]:
+        vals = []
+        for it in self._get_sub_entries():
+            sub = _norm_sub(str(it.get("sub") or ""))
+            if sub:
+                vals.append(sub)
+        return _uniq_keep_order(vals)
+
     def _available_categories(self) -> List[str]:
         vals = []
         for it in self._get_cache():
@@ -1499,24 +2161,115 @@ class Plugin(BasePlugin):
         val = str(source_value or "")
         opts = self._source_filter_options()
         self._source_filter = val if val in opts else ""
+        self._source_exclude_filters = []
+        try:
+            self.set_setting("source_exclude_filter", "")
+            self.set_setting("source_exclude_filters", "[]")
+        except Exception: pass
         self._update_source_button()
-        self._animate_list_once = True
+        self._animate_list_once = False
         self._render()
 
     def _set_category_filter(self, category_value: str):
         val = _norm_category(category_value)
         opts = self._category_filter_options()
         self._category_filter = val if val in opts else ""
+        self._category_exclude_filters = []
+        try:
+            self.set_setting("category_exclude_filter", "")
+            self.set_setting("category_exclude_filters", "[]")
+        except Exception: pass
         self._update_source_button()
-        self._animate_list_once = True
+        self._animate_list_once = False
         self._render()
+
+    def _set_source_exclude_filter(self, source_value: str) -> bool:
+        val = str(source_value or "")
+        opts = self._source_filter_options()
+        if val not in opts or not val:
+            return False
+        arr = list(self._source_exclude_filters)
+        if val in arr:
+            arr = [x for x in arr if x != val]
+            is_excluded = False
+        else:
+            arr.append(val)
+            is_excluded = True
+        self._source_exclude_filters = _uniq_keep_order(arr)
+        self._source_filter = ""
+        try:
+            self.set_setting("source_exclude_filter", "")
+            self.set_setting("source_exclude_filters", json.dumps(self._source_exclude_filters, ensure_ascii=False))
+        except Exception: pass
+        self._update_source_button()
+        self._animate_list_once = False
+        self._render()
+        return is_excluded
+
+    def _set_category_exclude_filter(self, category_value: str) -> bool:
+        val = _norm_category(category_value)
+        opts = self._category_filter_options()
+        if val not in opts or not val:
+            return False
+        arr = list(self._category_exclude_filters)
+        if val in arr:
+            arr = [x for x in arr if x != val]
+            is_excluded = False
+        else:
+            arr.append(val)
+            is_excluded = True
+        self._category_exclude_filters = _uniq_keep_order(arr)
+        self._category_filter = ""
+        try:
+            self.set_setting("category_exclude_filter", "")
+            self.set_setting("category_exclude_filters", json.dumps(self._category_exclude_filters, ensure_ascii=False))
+        except Exception: pass
+        self._update_source_button()
+        self._animate_list_once = False
+        self._render()
+        return is_excluded
+
+    def _toggle_sub_exclude_filter(self, sub_key: str) -> bool:
+        val = _norm_sub(sub_key)
+        if not val:
+            return False
+        arr = list(self._sub_exclude_filters)
+        if val in arr:
+            arr = [x for x in arr if x != val]
+            is_excluded = False
+        else:
+            arr.append(val)
+            is_excluded = True
+        self._sub_exclude_filters = _uniq_keep_order(arr)
+        try:
+            self.set_setting("sub_exclude_filters", json.dumps(self._sub_exclude_filters, ensure_ascii=False))
+        except Exception:
+            pass
+        self._render()
+        return is_excluded
+
+    def _is_item_blocked_by_sub_exclude(self, it: Dict[str, Any]) -> bool:
+        try:
+            blocked = set(self._sub_exclude_filters or [])
+            if not blocked:
+                return False
+            src_handle = str(it.get("source_handle", "") or "").strip()
+            src = str(it.get("source", "") or "").strip()
+            if src_handle.startswith("@"):
+                if _norm_sub("tguser:" + src_handle[1:]) in blocked:
+                    return True
+            if src and _norm_sub(src) in blocked:
+                return True
+        except Exception:
+            return False
+        return False
 
     def _open_top_filter_picker(self):
         if self._mode in ("settings", "subs"): return
         if self._mode == "cats": self._open_category_picker_screen()
         else: self._open_source_picker_screen()
 
-    def _open_picker_screen(self, picker_title: str, options: List[Tuple[str, str]], current_value: str, on_select):
+    def _open_picker_screen(self, picker_title: str, options: List[Tuple[str, str]], current_value: str, on_select, on_long_select=None, excluded_values: Optional[List[str]] = None):
         if self._src_overlay is not None: return
         fragment = get_last_fragment()
         if not fragment: return
@@ -1548,8 +2301,15 @@ class Plugin(BasePlugin):
         title_tv.setTextSize(22)
         title_tv.setTypeface(None, Typeface.BOLD)
         title_tv.setTextColor(_c(COLOR_TEXT_PR))
-        title_tv.setPadding(_dp(8), 0, _dp(8), _dp(16))
+        title_tv.setPadding(_dp(8), 0, _dp(8), _dp(8))
         card.addView(title_tv)
+
+        hint_tv = TextView(activity)
+        hint_tv.setText(_tr("Долгое нажатие: исключить", "Long press: exclude"))
+        hint_tv.setTextSize(12)
+        hint_tv.setTextColor(_c(COLOR_TEXT_SEC))
+        hint_tv.setPadding(_dp(8), 0, _dp(8), _dp(12))
+        card.addView(hint_tv)
 
         sv = ScrollView(activity)
         sv.setLayoutParams(LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
@@ -1567,9 +2327,16 @@ class Plugin(BasePlugin):
             btn.setTextColor(_c(COLOR_TEXT_PR))
             btn.setPadding(_dp(16), _dp(14), _dp(16), _dp(14))
             btn.setClickable(True)
+            excluded_set = set(str(x) for x in (excluded_values or []))
             selected = (value == current)
-            btn.setAlpha(1.0 if selected else 0.8)
-            btn.setBackground(self._bg_rounded(COLOR_ACCENT if selected else "#08FFFFFF", radius_dp=16))
+            excluded = (value in excluded_set and bool(value))
+            btn.setAlpha(1.0 if (selected or excluded) else 0.8)
+            if excluded:
+                btn.setTextColor(_c("#FFFF6B6B"))
+                btn.setBackground(self._bg_rounded("#22FF6B6B", "#66FF6B6B", stroke_dp=1, radius_dp=16))
+            else:
+                btn.setTextColor(_c(COLOR_TEXT_PR))
+                btn.setBackground(self._bg_rounded(self._accent() if selected else "#08FFFFFF", radius_dp=16))
             
             def make_on_select(v_val):
                 def _click(_v):
@@ -1581,6 +2348,26 @@ class Plugin(BasePlugin):
                 return _click
 
             btn.setOnClickListener(OnClickListener(make_on_select(value)))
+
+            if on_long_select is not None and value:
+                def make_on_long(v_val):
+                    def _long(_v):
+                        self._bounce_anim(_v)
+                        try:
+                            is_now_excluded = bool(on_long_select(v_val))
+                            if is_now_excluded:
+                                _v.setTextColor(_c("#FFFF6B6B"))
+                                _v.setBackground(self._bg_rounded("#22FF6B6B", "#66FF6B6B", stroke_dp=1, radius_dp=16))
+                            else:
+                                _v.setTextColor(_c(COLOR_TEXT_PR))
+                                _v.setBackground(self._bg_rounded("#08FFFFFF", radius_dp=16))
+                            return True
+                        except Exception:
+                            return False
+                    return _long
+                try: btn.setOnLongClickListener(_OnLongClickListener(make_on_long(value)))
+                except Exception: pass
+
             lp_btn = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             lp_btn.bottomMargin = _dp(8)
             col.addView(btn, lp_btn)
@@ -1601,13 +2388,13 @@ class Plugin(BasePlugin):
         vals = self._source_filter_options()
         options = [("", _tr("Все источники", "All sources"))] + [(x, x) for x in vals if x]
         cur = self._source_filter if self._source_filter in vals else ""
-        self._open_picker_screen(_tr("Выбор источника", "Select source"), options, cur, self._set_source_filter)
+        self._open_picker_screen(_tr("Выбор источника", "Select source"), options, cur, self._set_source_filter, self._set_source_exclude_filter, self._source_exclude_filters)
 
     def _open_category_picker_screen(self):
         vals = self._category_filter_options()
         options = [("", _tr("Все категории", "All categories"))] + [(x, x) for x in vals if x]
         cur = self._category_filter if self._category_filter in vals else ""
-        self._open_picker_screen(_tr("Выбор категории", "Select category"), options, cur, self._set_category_filter)
+        self._open_picker_screen(_tr("Выбор категории", "Select category"), options, cur, self._set_category_filter, self._set_category_exclude_filter, self._category_exclude_filters)
 
     def _close_source_picker_screen(self, animated: bool):
         overlay = self._src_overlay
@@ -1626,6 +2413,7 @@ class Plugin(BasePlugin):
 
     def _refresh_now(self):
         sub_entries = self._get_sub_entries()
+        active_subs = {_norm_sub(str(x.get("sub") or "")) for x in sub_entries if _norm_sub(str(x.get("sub") or ""))}
         old = self._get_cache()
         old_by_key = {}
         for x in old:
@@ -1683,6 +2471,28 @@ class Plugin(BasePlugin):
             seen.add(key)
             uniq.append(it)
 
+        if active_subs:
+            for old_it in old:
+                if not isinstance(old_it, dict):
+                    continue
+                src_handle = str(old_it.get("source_handle", "") or "").strip()
+                src = str(old_it.get("source", "") or "").strip()
+                keep = False
+                if src_handle and src_handle.startswith("@"):
+                    tg_sub = _norm_sub("tguser:" + src_handle[1:])
+                    if tg_sub in active_subs:
+                        keep = True
+                if (not keep) and src:
+                    if _norm_sub(src) in active_subs:
+                        keep = True
+                if not keep:
+                    continue
+                key = str(old_it.get("tg_post_id") or old_it.get("link") or "")
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                uniq.append(old_it)
+
         uniq.sort(key=lambda x: int(x.get("sort_ts", x.get("ts", 0) or 0) or 0), reverse=True)
         self._set_cache(uniq[:900])
 
@@ -1707,7 +2517,7 @@ class Plugin(BasePlugin):
 
         bar = View(ctx)
         gd = GradientDrawable()
-        gd.setColor(_c(COLOR_ACCENT))
+        gd.setColor(_c(self._accent()))
         gd.setCornerRadius(_dp(99))
         bar.setBackground(gd)
 
@@ -1750,7 +2560,7 @@ class Plugin(BasePlugin):
         b.setTypeface(None, Typeface.BOLD)
         b.setPadding(_dp(16), _dp(16), _dp(16), _dp(16))
         b.setClickable(True)
-        b.setBackground(self._bg_rounded(COLOR_ACCENT, radius_dp=16))
+        b.setBackground(self._bg_rounded(self._accent(), radius_dp=16))
         def on_click(v):
             self._bounce_anim(v)
             try: cb()
@@ -1780,8 +2590,34 @@ class Plugin(BasePlugin):
         b.setOnClickListener(OnClickListener(on_click))
         return b
 
+    def _attach_feed_swipe_touch(self, v: Optional[View]):
+        if v is None: return
+        try:
+            if self._feed_item_touch_listener is not None:
+                v.setOnTouchListener(self._feed_item_touch_listener)
+        except Exception:
+            pass
+
     def _mode_order(self) -> List[str]:
         return ["feed", "cats", "subs", "settings"]
+
+    def _selected_nav_button(self) -> Optional[TextView]:
+        if self._mode == "feed": return self._nav_feed_btn
+        if self._mode == "cats": return self._nav_cats_btn
+        if self._mode == "subs": return self._nav_subs_btn
+        if self._mode == "settings": return self._nav_settings_btn
+        return None
+
+    def _animate_selected_nav(self):
+        btn = self._selected_nav_button()
+        if btn is None: return
+        try:
+            btn.animate().cancel()
+            btn.setScaleX(0.94)
+            btn.setScaleY(0.94)
+            btn.animate().scaleX(1.0).scaleY(1.0).setDuration(180).setInterpolator(DecelerateInterpolator()).start()
+        except Exception:
+            self._reset_press_state(btn)
 
     def _mode_index(self, mode: str) -> int:
         order = self._mode_order()
@@ -1821,6 +2657,9 @@ class Plugin(BasePlugin):
     # ---------- MAIN SCREEN ----------
     def _open(self, fragment):
         self._reload_ui_scale_from_settings()
+        self._remove_pencil_hook_view_trigger()
+        if self._unread_new_posts > 0:
+            self._set_unread_count(0, persist=True)
         if self._overlay is not None: return
         if not fragment: fragment = get_last_fragment()
         if not fragment: return
@@ -1958,6 +2797,7 @@ class Plugin(BasePlugin):
         try:
             self._main_touch_listener = _OnTouchListener(self._handle_global_touch)
             sv.setOnTouchListener(self._main_touch_listener)
+            overlay.setOnTouchListener(self._main_touch_listener)
         except Exception:
             self._main_touch_listener = None
 
@@ -1996,6 +2836,10 @@ class Plugin(BasePlugin):
             self._bottom_nav_row = None
             self._feed_item_touch_listener = None
             self._ui_seek_listener = None
+            self._corner_seek_listener = None
+            self._accent_seek_listener = None
+            self._bg_minutes_seek_listener = None
+            run_on_ui_thread(self._install_pencil_hook_view_trigger)
 
         if not animated or content is None: detach(); return
         self._slide_down_exit(overlay, content)
@@ -2003,7 +2847,10 @@ class Plugin(BasePlugin):
         except Exception: run_on_ui_thread(detach)
 
     def _set_mode(self, mode: str):
-        if mode == self._mode: return
+        if mode == self._mode:
+            self._update_bottom_nav_state()
+            self._animate_selected_nav()
+            return
         self._close_source_picker_screen(animated=False)
         prev_idx = self._mode_index(self._mode)
         self._mode = mode
@@ -2018,14 +2865,10 @@ class Plugin(BasePlugin):
         except Exception: pass
         self._render()
         self._update_bottom_nav_state()
+        self._animate_selected_nav()
         try:
             container.setAlpha(1.0)
-            direction = 1 if new_idx > prev_idx else -1
-            container.setTranslationX(float(direction * _dp(30)))
-            anim_in = container.animate().translationX(0.0).setDuration(220)
-            try: anim_in.setInterpolator(DecelerateInterpolator())
-            except Exception: pass
-            anim_in.start()
+            container.setTranslationX(0.0)
         except Exception: pass
 
     # ---------- Add feed screen ----------
@@ -2193,13 +3036,13 @@ class Plugin(BasePlugin):
         top.addView(self._spacer_h(activity, 12))
 
         title = TextView(activity)
-        title.setText(_tr("Категория", "Category"))
+        title.setText(_tr("Редактирование подписки", "Edit subscription"))
         title.setTextSize(26)
         title.setTypeface(None, Typeface.BOLD)
         title.setTextColor(_c(COLOR_TEXT_PR))
         top.addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
 
-        show = ("@" + sub_key.split(":", 1)[1]) if sub_key.startswith("tguser:") else sub_key
+        show = _sub_to_label(sub_key)
         source_tv = TextView(activity)
         source_tv.setText(show)
         source_tv.setTextSize(16)
@@ -2207,6 +3050,26 @@ class Plugin(BasePlugin):
         source_tv.setAlpha(0.8)
         source_tv.setPadding(0, _dp(30), 0, _dp(12))
         content.addView(source_tv)
+
+        link_hint = TextView(activity)
+        link_hint.setText(_tr("Ссылка / источник", "Link / source"))
+        link_hint.setTextSize(14)
+        link_hint.setTextColor(_c(COLOR_TEXT_SEC))
+        link_hint.setPadding(0, _dp(12), 0, _dp(8))
+        content.addView(link_hint)
+
+        source_input = EditText(activity)
+        source_input.setHint(_tr("https://... или @username", "https://... or @username"))
+        source_input.setSingleLine(True)
+        source_input.setText(sub_key)
+        source_input.setPadding(_dp(16), _dp(16), _dp(16), _dp(16))
+        source_input.setTextColor(_c(COLOR_TEXT_PR))
+        try:
+            source_input.setHintTextColor(_c("#66FFFFFF"))
+        except Exception:
+            pass
+        source_input.setBackground(self._bg_rounded(COLOR_CARD, COLOR_STROKE, stroke_dp=1, radius_dp=16))
+        content.addView(source_input, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
         category_input = EditText(activity)
         category_input.setHint(_tr("Любая категория", "Any category"))
@@ -2217,13 +3080,15 @@ class Plugin(BasePlugin):
         try: category_input.setHintTextColor(_c("#66FFFFFF"))
         except Exception: pass
         category_input.setBackground(self._bg_rounded(COLOR_CARD, COLOR_STROKE, stroke_dp=1, radius_dp=16))
-        content.addView(category_input, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        lp_cat = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp_cat.topMargin = _dp(10)
+        content.addView(category_input, lp_cat)
 
         push = View(activity)
         push.setLayoutParams(LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1.0))
         content.addView(push)
 
-        save_btn = self._primary_button(activity, _tr("Сохранить", "Save"), lambda: self._save_sub_category(sub_key, category_input))
+        save_btn = self._primary_button(activity, _tr("Сохранить", "Save"), lambda: self._save_sub_edit(sub_key, source_input, category_input))
         content.addView(save_btn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
         self._cat_overlay = overlay
@@ -2232,16 +3097,48 @@ class Plugin(BasePlugin):
         self._bind_back_handler(overlay, lambda: self._handle_back_action(), "_cat_back_listener")
         self._slide_up_enter(overlay, content)
 
-    def _save_sub_category(self, sub_key: str, category_input: EditText):
+    def _save_sub_edit(self, sub_key: str, source_input: EditText, category_input: EditText):
+        new_sub = _norm_sub(str(source_input.getText().toString()))
+        if not new_sub:
+            try:
+                Toast.makeText(ApplicationLoader.applicationContext, _tr("Укажите корректный источник", "Enter a valid source"), Toast.LENGTH_SHORT).show()
+            except Exception:
+                pass
+            return
         cat = _norm_category(str(category_input.getText().toString()))
         entries = self._get_sub_entries()
         changed = False
+        exists_same = False
+        for it in entries:
+            cur = str(it.get("sub") or "")
+            if cur != sub_key and cur == new_sub:
+                exists_same = True
+                break
+        if exists_same:
+            try:
+                Toast.makeText(ApplicationLoader.applicationContext, _tr("Такая подписка уже есть", "Subscription already exists"), Toast.LENGTH_SHORT).show()
+            except Exception:
+                pass
+            return
         for it in entries:
             if str(it.get("sub") or "") == sub_key:
+                it["sub"] = new_sub
                 it["category"] = cat
                 changed = True; break
         if not changed: return
         self._set_sub_entries(entries)
+        if self._sub_exclude_filters:
+            updated = []
+            for s in self._sub_exclude_filters:
+                if s == sub_key:
+                    updated.append(new_sub)
+                else:
+                    updated.append(s)
+            self._sub_exclude_filters = _uniq_keep_order(updated)
+            try:
+                self.set_setting("sub_exclude_filters", json.dumps(self._sub_exclude_filters, ensure_ascii=False))
+            except Exception:
+                pass
         self._close_category_screen(animated=True)
         if self._overlay is not None:
             self._render()
@@ -2367,27 +3264,87 @@ class Plugin(BasePlugin):
             col.addView(chip, lp)
 
         # Edge-to-edge style images inside the padded col by giving negative margin? No, just round them
-        for img_idx, img_url in enumerate(images):
-            iv = ImageView(activity)
-            iv.setVisibility(View.GONE)
-            iv.setAdjustViewBounds(True)
-            try: iv.setScaleType(ImageView.ScaleType.FIT_CENTER)
-            except Exception: pass
-            iv.setBackground(self._bg_rounded(COLOR_CARD, COLOR_STROKE, stroke_dp=1, radius_dp=20))
-            self._apply_rounded_clip(iv)
+        loading_images_tv = None
+        loading_images_pb = None
+        loading_row = None
+        if len(images) > 1:
+            loading_row = LinearLayout(activity)
+            loading_row.setOrientation(LinearLayout.HORIZONTAL)
+            loading_row.setGravity(Gravity.CENTER_VERTICAL)
+            loading_row.setPadding(0, 0, 0, _dp(10))
+            loading_images_pb = ProgressBar(activity)
+            loading_row.addView(loading_images_pb, LinearLayout.LayoutParams(_dp(16), _dp(16)))
+            loading_images_tv = TextView(activity)
+            loading_images_tv.setText(_tr("Загрузка изображений…", "Loading images…"))
+            loading_images_tv.setTextSize(13)
+            loading_images_tv.setTextColor(_c(COLOR_TEXT_SEC))
+            loading_images_tv.setPadding(_dp(8), 0, 0, 0)
+            loading_row.addView(loading_images_tv)
+            col.addView(loading_row)
 
-            iv.setClickable(True)
-            u = img_url
-            def on_img_click(_v, uu=u):
-                self._bounce_anim(_v)
-                try: self._open_image_screen(get_last_fragment(), uu)
+        post_mode = str(self._img_layout_mode or "primary")
+        if post_mode == "grid" and len(images) > 1:
+            grid = LinearLayout(activity)
+            grid.setOrientation(LinearLayout.VERTICAL)
+            lp_grid = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            lp_grid.bottomMargin = _dp(24)
+            col.addView(grid, lp_grid)
+            row = None
+            for img_idx, img_url in enumerate(images):
+                if img_idx % 2 == 0:
+                    row = LinearLayout(activity)
+                    row.setOrientation(LinearLayout.HORIZONTAL)
+                    row.setGravity(Gravity.CENTER_VERTICAL)
+                    if img_idx > 0:
+                        try: row.setPadding(0, _dp(10), 0, 0)
+                        except Exception: pass
+                    grid.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                iv = ImageView(activity)
+                iv.setVisibility(View.GONE)
+                iv.setAdjustViewBounds(True)
+                try: iv.setScaleType(ImageView.ScaleType.CENTER_CROP)
                 except Exception: pass
-            iv.setOnClickListener(OnClickListener(on_img_click))
+                iv.setBackground(self._bg_rounded(COLOR_CARD, COLOR_STROKE, stroke_dp=1, radius_dp=18))
+                self._apply_rounded_clip(iv)
+                iv.setClickable(True)
+                u = img_url
+                def on_img_click(_v, uu=u, all_images=images, idx=img_idx):
+                    self._bounce_anim(_v)
+                    try: self._open_image_screen(get_last_fragment(), uu, all_images, idx)
+                    except Exception: pass
+                iv.setOnClickListener(OnClickListener(on_img_click))
+                lp_iv = LinearLayout.LayoutParams(0, _dp(220), 1.0)
+                if img_idx % 2 == 0:
+                    lp_iv.rightMargin = _dp(6)
+                else:
+                    lp_iv.leftMargin = _dp(6)
+                row.addView(iv, lp_iv)
+                self._load_image_into(img_url, iv, quick_preview=True, loading_label=loading_images_tv, loading_spinner=loading_images_pb, loading_container=loading_row)
+            if len(images) % 2 == 1 and row is not None:
+                spacer = View(activity)
+                row.addView(spacer, LinearLayout.LayoutParams(0, _dp(220), 1.0))
+        else:
+            for img_idx, img_url in enumerate(images):
+                iv = ImageView(activity)
+                iv.setVisibility(View.GONE)
+                iv.setAdjustViewBounds(True)
+                try: iv.setScaleType(ImageView.ScaleType.FIT_CENTER)
+                except Exception: pass
+                iv.setBackground(self._bg_rounded(COLOR_CARD, COLOR_STROKE, stroke_dp=1, radius_dp=20))
+                self._apply_rounded_clip(iv)
 
-            ilp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, _dp(500))
-            ilp.bottomMargin = _dp(12 if img_idx < len(images) - 1 else 24)
-            col.addView(iv, ilp)
-            self._load_image_into(img_url, iv)
+                iv.setClickable(True)
+                u = img_url
+                def on_img_click(_v, uu=u, all_images=images, idx=img_idx):
+                    self._bounce_anim(_v)
+                    try: self._open_image_screen(get_last_fragment(), uu, all_images, idx)
+                    except Exception: pass
+                iv.setOnClickListener(OnClickListener(on_img_click))
+
+                ilp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, _dp(500))
+                ilp.bottomMargin = _dp(12 if img_idx < len(images) - 1 else 24)
+                col.addView(iv, ilp)
+                self._load_image_into(img_url, iv, quick_preview=True, loading_label=loading_images_tv, loading_spinner=loading_images_pb, loading_container=loading_row)
 
         if body:
             tv_body = TextView(activity)
@@ -2421,7 +3378,7 @@ class Plugin(BasePlugin):
         except Exception: run_on_ui_thread(detach)
 
     # ---------- Image fullscreen screen ----------
-    def _open_image_screen(self, fragment, url: str):
+    def _open_image_screen(self, fragment, url: str, images: Optional[List[str]] = None, start_index: int = 0):
         if not url: return
         if self._img_overlay is not None: return
         if not fragment: fragment = get_last_fragment()
@@ -2453,18 +3410,205 @@ class Plugin(BasePlugin):
         open_btn = self._top_button(activity, _tr("Браузер", "Browser"), lambda: self._open_link(get_last_fragment(), url))
         top.addView(open_btn)
 
+        zoom_row = LinearLayout(activity)
+        zoom_row.setOrientation(LinearLayout.HORIZONTAL)
+        zoom_row.setGravity(Gravity.CENTER_VERTICAL)
+        zoom_row.setPadding(0, _dp(8), 0, _dp(4))
+        content.addView(zoom_row)
+
+        image_list = _norm_images_list(images or [])
+        if not image_list:
+            image_list = [_upgrade_image_url(url)]
+        if not image_list:
+            image_list = [url]
+        idx = int(start_index)
+        if idx < 0: idx = 0
+        if idx >= len(image_list): idx = len(image_list) - 1
+        state = {"idx": idx}
+
+        image_pos_tv = TextView(activity)
+        image_pos_tv.setTextColor(_c(COLOR_TEXT_SEC))
+        image_pos_tv.setTextSize(13)
+        zoom_row.addView(TextView(activity), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
+        zoom_row.addView(image_pos_tv)
+
         iv = ImageView(activity)
         iv.setVisibility(View.GONE)
         iv.setAdjustViewBounds(True)
         try: iv.setScaleType(ImageView.ScaleType.FIT_CENTER)
         except Exception: pass
         iv.setBackground(self._bg_rounded("#00000000"))
+
+        zoom = {"scale": 1.0, "base_dist": 0.0, "tx": 0.0, "ty": 0.0, "pan_x": 0.0, "pan_y": 0.0, "swipe_x": 0.0, "swipe_y": 0.0}
+
+        def _max_pan_x_for(scale: float) -> float:
+            try:
+                vw = float(iv.getWidth())
+                if vw <= 0.0: vw = float(iv.getMeasuredWidth())
+            except Exception:
+                vw = 0.0
+            return max(0.0, (vw * (max(1.0, scale) - 1.0)) / 2.0)
+
+        def _max_pan_y_for(scale: float) -> float:
+            try:
+                vh = float(iv.getHeight())
+                if vh <= 0.0: vh = float(iv.getMeasuredHeight())
+            except Exception:
+                vh = 0.0
+            return max(0.0, (vh * (max(1.0, scale) - 1.0)) / 2.0)
+
+        def _apply_pan(tx: float, ty: float):
+            sc = float(zoom.get("scale", 1.0))
+            if sc <= 1.0:
+                tx = 0.0
+                ty = 0.0
+            mx = _max_pan_x_for(sc)
+            my = _max_pan_y_for(sc)
+            if tx > mx: tx = mx
+            if tx < -mx: tx = -mx
+            if ty > my: ty = my
+            if ty < -my: ty = -my
+            zoom["tx"] = float(tx)
+            zoom["ty"] = float(ty)
+            try:
+                iv.setTranslationX(float(tx))
+                iv.setTranslationY(float(ty))
+            except Exception:
+                pass
+
+        def _apply_image_by_index(new_idx: int):
+            if new_idx < 0 or new_idx >= len(image_list):
+                return
+            state["idx"] = int(new_idx)
+            try:
+                image_pos_tv.setText(f"{int(state['idx']) + 1}/{len(image_list)}")
+            except Exception:
+                pass
+            _apply_zoom(1.0)
+            _apply_pan(0.0, 0.0)
+            self._load_image_into(image_list[int(state["idx"])], iv)
+
+        def _shift_image(delta: int):
+            ni = int(state.get("idx", 0)) + int(delta)
+            if ni < 0 or ni >= len(image_list):
+                return
+            _apply_image_by_index(ni)
+
+        def _apply_zoom(ns: float):
+            if ns < 1.0: ns = 1.0
+            if ns > 4.0: ns = 4.0
+            zoom["scale"] = ns
+            try:
+                iv.setScaleX(ns)
+                iv.setScaleY(ns)
+            except Exception:
+                pass
+            if ns <= 1.0:
+                _apply_pan(0.0, 0.0)
+            else:
+                _apply_pan(float(zoom.get("tx", 0.0)), float(zoom.get("ty", 0.0)))
+
+        def _dist(ev):
+            try:
+                if int(ev.getPointerCount()) < 2: return 0.0
+                dx = float(ev.getX(0) - ev.getX(1))
+                dy = float(ev.getY(0) - ev.getY(1))
+                return (dx * dx + dy * dy) ** 0.5
+            except Exception:
+                return 0.0
+
+        def _on_img_touch(_v, ev):
+            try:
+                try: act = int(ev.getActionMasked())
+                except Exception: act = int(ev.getAction())
+                pcount = int(ev.getPointerCount())
+            except Exception:
+                return False
+            try:
+                if pcount >= 2 and act in (int(MotionEvent.ACTION_DOWN), int(MotionEvent.ACTION_POINTER_DOWN), int(MotionEvent.ACTION_MOVE)):
+                    try:
+                        par = iv.getParent()
+                        if par is not None: par.requestDisallowInterceptTouchEvent(True)
+                    except Exception:
+                        pass
+                if act in (int(MotionEvent.ACTION_POINTER_DOWN), int(MotionEvent.ACTION_DOWN)) and pcount >= 2:
+                    zoom["base_dist"] = _dist(ev)
+                    try:
+                        zoom["pan_x"] = float(ev.getRawX())
+                        zoom["pan_y"] = float(ev.getRawY())
+                    except Exception:
+                        pass
+                    return True
+                if act == int(MotionEvent.ACTION_MOVE) and pcount >= 2:
+                    d = _dist(ev)
+                    bd = float(zoom.get("base_dist", 0.0))
+                    if bd > 0.0 and d > 0.0:
+                        cur_sc = float(zoom.get("scale", 1.0))
+                        tgt_sc = cur_sc * (d / bd)
+                        smooth_sc = cur_sc + (tgt_sc - cur_sc) * 0.35
+                        _apply_zoom(smooth_sc)
+                        zoom["base_dist"] = d
+                    return True
+                if pcount == 1 and act == int(MotionEvent.ACTION_DOWN):
+                    try:
+                        zoom["pan_x"] = float(ev.getRawX())
+                        zoom["pan_y"] = float(ev.getRawY())
+                        zoom["swipe_x"] = float(ev.getRawX())
+                        zoom["swipe_y"] = float(ev.getRawY())
+                        try:
+                            par = iv.getParent()
+                            if par is not None: par.requestDisallowInterceptTouchEvent(True)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                    return True
+                if pcount == 1 and act == int(MotionEvent.ACTION_MOVE):
+                    sc = float(zoom.get("scale", 1.0))
+                    if sc > 1.0:
+                        try:
+                            rx = float(ev.getRawX())
+                            ry = float(ev.getRawY())
+                            dx = rx - float(zoom.get("pan_x", rx))
+                            dy = ry - float(zoom.get("pan_y", ry))
+                            zoom["pan_x"] = rx
+                            zoom["pan_y"] = ry
+                            _apply_pan(float(zoom.get("tx", 0.0)) + dx, float(zoom.get("ty", 0.0)) + dy)
+                            try:
+                                par = iv.getParent()
+                                if par is not None: par.requestDisallowInterceptTouchEvent(True)
+                            except Exception:
+                                pass
+                            return True
+                        except Exception:
+                            return True
+                    return False
+                if act in (int(MotionEvent.ACTION_POINTER_UP), int(MotionEvent.ACTION_UP), int(MotionEvent.ACTION_CANCEL)):
+                    if pcount <= 1 and act == int(MotionEvent.ACTION_UP) and float(zoom.get("scale", 1.0)) <= 1.01 and len(image_list) > 1:
+                        try:
+                            dx = float(ev.getRawX()) - float(zoom.get("swipe_x", 0.0))
+                            dy = abs(float(ev.getRawY()) - float(zoom.get("swipe_y", 0.0)))
+                            if abs(dx) >= float(_dp(44)) and dy <= float(_dp(72)):
+                                _shift_image(-1 if dx > 0 else 1)
+                                return True
+                        except Exception:
+                            pass
+                    zoom["base_dist"] = 0.0
+                    if float(zoom.get("scale", 1.0)) <= 1.01:
+                        _apply_zoom(1.0)
+                    return bool(float(zoom.get("scale", 1.0)) > 1.0)
+            except Exception:
+                return False
+            return bool(float(zoom.get("scale", 1.0)) > 1.0)
+
+        try: iv.setOnTouchListener(_OnTouchListener(_on_img_touch))
+        except Exception: pass
         
         ilp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
         ilp.topMargin = _dp(16)
         content.addView(iv, ilp)
 
-        self._load_image_into(url, iv)
+        _apply_image_by_index(int(state.get("idx", 0)))
 
         self._img_overlay = overlay
         self._img_content = content
@@ -2473,11 +3617,7 @@ class Plugin(BasePlugin):
 
         try:
             overlay.setAlpha(0.0)
-            iv.setScaleX(0.8); iv.setScaleY(0.8)
             overlay.animate().alpha(1.0).setDuration(250).start()
-            anim = iv.animate().scaleX(1.0).scaleY(1.0).setDuration(350)
-            anim.setInterpolator(OvershootInterpolator(1.0))
-            anim.start()
         except Exception: pass
 
     def _close_image_screen(self, animated: bool):
@@ -2499,40 +3639,152 @@ class Plugin(BasePlugin):
         except Exception: run_on_ui_thread(detach)
 
     # ---------- image loading ----------
-    def _load_image_into(self, url: str, iv: ImageView):
+    def _load_image_into(self, url: str, iv: ImageView, quick_preview: bool = False, loading_label: Optional[TextView] = None, loading_spinner: Optional[View] = None, loading_container: Optional[View] = None):
         url = _upgrade_image_url(url)
         if not url: return
+
+        def start_loading_pulse(lbl: Optional[TextView]):
+            if lbl is None:
+                return
+            def _tick():
+                try:
+                    if int(lbl.getVisibility()) != int(View.VISIBLE):
+                        return
+                    try:
+                        lbl.animate().alpha(0.42).setDuration(320).withEndAction(
+                            Runnable(lambda: lbl.animate().alpha(1.0).setDuration(320).start())
+                        ).start()
+                    except Exception:
+                        pass
+                    try:
+                        AndroidUtilities.runOnUIThread(Runnable(_tick), 700)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            run_on_ui_thread(_tick)
+
+        def _set_loading_visible(vis: bool):
+            if loading_container is not None:
+                try:
+                    loading_container.setVisibility(View.VISIBLE if vis else View.GONE)
+                except Exception:
+                    pass
+            if loading_label is not None:
+                try:
+                    if loading_container is None:
+                        loading_label.setVisibility(View.VISIBLE if vis else View.GONE)
+                except Exception:
+                    pass
+            if loading_spinner is not None:
+                try:
+                    loading_spinner.setVisibility(View.VISIBLE if vis else View.GONE)
+                except Exception:
+                    pass
+
         with self._img_cache_lock: bmp = self._img_cache.get(url)
         if bmp is not None:
             try: iv.setImageBitmap(bmp); iv.setVisibility(View.VISIBLE)
             except Exception: pass
+            if loading_label is not None:
+                try:
+                    loading_label.setAlpha(1.0)
+                    _set_loading_visible(False)
+                except Exception: pass
+            try:
+                iv.setAlpha(1.0)
+                iv.clearColorFilter()
+            except Exception: pass
             return
+
+        if loading_label is not None:
+            try:
+                loading_label.setText(_tr("Загрузка превью…", "Loading preview…"))
+                loading_label.setAlpha(1.0)
+                _set_loading_visible(True)
+            except Exception:
+                pass
+            start_loading_pulse(loading_label)
+
+        def decode_preview(data: bytes):
+            try:
+                opts_p = BitmapFactory.Options()
+                opts_p.inPreferredConfig = Bitmap.Config.RGB_565 if Bitmap is not None else None
+                opts_p.inSampleSize = 12
+                return BitmapFactory.decodeByteArray(data, 0, len(data), opts_p)
+            except Exception:
+                return None
+
+        def decode_full(data: bytes):
+            try:
+                if Bitmap is not None:
+                    opts = BitmapFactory.Options()
+                    opts.inPreferredConfig = Bitmap.Config.ARGB_8888
+                    opts.inScaled = False
+                    bmp2 = BitmapFactory.decodeByteArray(data, 0, len(data), opts)
+                    if bmp2 is not None: return bmp2
+            except Exception:
+                pass
+            try:
+                return BitmapFactory.decodeByteArray(data, 0, len(data))
+            except Exception:
+                return None
+
         def bg():
             try:
                 req = urllib.request.Request(url, headers={"User-Agent": "Exteragram-RSS-Plugin/2.0.0"})
                 with urllib.request.urlopen(req, timeout=14) as resp: data = resp.read()
-                bmp2 = None
-                try:
-                    if Bitmap is not None:
-                        opts = BitmapFactory.Options()
-                        opts.inPreferredConfig = Bitmap.Config.ARGB_8888
-                        opts.inScaled = False
-                        bmp2 = BitmapFactory.decodeByteArray(data, 0, len(data), opts)
-                except Exception: bmp2 = None
-                if bmp2 is None: bmp2 = BitmapFactory.decodeByteArray(data, 0, len(data))
+
+                prev = decode_preview(data)
+                if prev is not None:
+                    def ui_prev():
+                        try:
+                            iv.setImageBitmap(prev)
+                            iv.setVisibility(View.VISIBLE)
+                            iv.setAlpha(0.0)
+                            try:
+                                iv.setColorFilter(_c("#7AFFFFFF"))
+                            except Exception:
+                                pass
+                            iv.animate().alpha(0.84).setDuration(180).start()
+                            if loading_label is not None:
+                                try:
+                                    loading_label.setText(_tr("Догружаем оригинал…", "Loading full quality…"))
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                    run_on_ui_thread(ui_prev)
+
+                bmp2 = decode_full(data)
                 if bmp2 is None: return
                 with self._img_cache_lock:
-                    if len(self._img_cache) > 80: self._img_cache.clear()
+                    if len(self._img_cache) > 240:
+                        try: self._img_cache.pop(next(iter(self._img_cache)))
+                        except Exception: pass
                     self._img_cache[url] = bmp2
+
                 def ui():
                     try:
                         iv.setImageBitmap(bmp2)
                         iv.setVisibility(View.VISIBLE)
                         iv.setAlpha(0.0)
-                        iv.animate().alpha(1.0).setDuration(300).start()
+                        try: iv.clearColorFilter()
+                        except Exception: pass
+                        iv.animate().alpha(1.0).setDuration(260).start()
                     except Exception: pass
+                    if loading_label is not None:
+                        try:
+                            loading_label.setAlpha(1.0)
+                            _set_loading_visible(False)
+                        except Exception: pass
                 run_on_ui_thread(ui)
-            except Exception: pass
+            except Exception:
+                if loading_label is not None:
+                    def ui_fail():
+                        try: loading_label.setText(_tr("Не удалось загрузить изображения", "Failed to load images"))
+                        except Exception: pass
+                    run_on_ui_thread(ui_fail)
         threading.Thread(target=bg, daemon=True).start()
 
     # ---------- render ----------
@@ -2572,6 +3824,9 @@ class Plugin(BasePlugin):
             if self._category_filter:
                 filt = self._category_filter
                 items = [it for it in all_items if _norm_category(it.get("category", "")) == filt]
+            elif self._category_exclude_filters:
+                excl_set = set(self._category_exclude_filters)
+                items = [it for it in all_items if _norm_category(it.get("category", "")) not in excl_set]
         else:
             if self._source_filter:
                 filt = self._source_filter
@@ -2580,6 +3835,16 @@ class Plugin(BasePlugin):
                     src_val = _format_source_line(it).strip()
                     if not src_val: src_val = str(it.get("source", "") or "").strip()
                     if src_val == filt: items.append(it)
+            elif self._source_exclude_filters:
+                excl_set = set(self._source_exclude_filters)
+                items = []
+                for it in all_items:
+                    src_val = _format_source_line(it).strip()
+                    if not src_val: src_val = str(it.get("source", "") or "").strip()
+                    if src_val not in excl_set: items.append(it)
+
+        if self._sub_exclude_filters:
+            items = [it for it in items if not self._is_item_blocked_by_sub_exclude(it)]
 
         if not items:
             t = TextView(ctx)
@@ -2592,7 +3857,7 @@ class Plugin(BasePlugin):
         if by_category:
             info = TextView(ctx)
             info.setText((_tr("Категория", "Category") + f": {self._category_filter}") if self._category_filter else (_tr("Все категории", "All categories")))
-            info.setTextSize(14); info.setTypeface(None, Typeface.BOLD); info.setTextColor(_c(COLOR_ACCENT))
+            info.setTextSize(14); info.setTypeface(None, Typeface.BOLD); info.setTextColor(_c(self._accent()))
             info.setPadding(_dp(4), 0, 0, _dp(16))
             self._list_container.addView(info)
 
@@ -2602,7 +3867,7 @@ class Plugin(BasePlugin):
         try: self._feed_item_touch_listener = _OnTouchListener(self._handle_global_touch)
         except Exception: self._feed_item_touch_listener = None
 
-        for idx, it in enumerate(items[:320]):
+        for idx, it in enumerate(items[:max(1, int(self._history_posts or 20))]):
             title = _strip_tags_and_format(str(it.get("title", "") or ""))
             if not title: title = _strip_tags_and_format(str(it.get("voice", "") or ""))[:120]
             if not title: title = _strip_tags_and_format(str(it.get("doc", "") or ""))[:120]
@@ -2636,10 +3901,7 @@ class Plugin(BasePlugin):
                 except Exception: pass
 
             card.setOnClickListener(OnClickListener(on_card_click))
-            try:
-                if self._feed_item_touch_listener is not None:
-                    card.setOnTouchListener(self._feed_item_touch_listener)
-            except Exception: pass
+            self._attach_feed_swipe_touch(card)
 
             if self._animate_list_once and idx < 10:
                 self._animate_entry(card, idx)
@@ -2649,6 +3911,7 @@ class Plugin(BasePlugin):
             header.setOrientation(LinearLayout.VERTICAL)
             header.setPadding(_dp(16), _dp(16), _dp(16), _dp(12))
             card.addView(header)
+            self._attach_feed_swipe_touch(header)
 
             tv_src = TextView(ctx)
             tv_src.setText(src)
@@ -2671,30 +3934,103 @@ class Plugin(BasePlugin):
                 header.addView(tv_meta)
 
             # IMAGE (Edge to Edge)
-            if img:
+            loading_img_tv = None
+            loading_img_pb = None
+            loading_row = None
+            if images:
+                loading_row = LinearLayout(ctx)
+                loading_row.setOrientation(LinearLayout.HORIZONTAL)
+                loading_row.setGravity(Gravity.CENTER_VERTICAL)
+                loading_row.setPadding(_dp(16), 0, _dp(16), _dp(8))
+                loading_img_pb = ProgressBar(ctx)
+                loading_row.addView(loading_img_pb, LinearLayout.LayoutParams(_dp(14), _dp(14)))
+                loading_img_tv = TextView(ctx)
+                loading_img_tv.setText(_tr("Загрузка превью…", "Loading preview…"))
+                loading_img_tv.setTextSize(12)
+                loading_img_tv.setTextColor(_c(COLOR_TEXT_SEC))
+                loading_img_tv.setPadding(_dp(8), 0, 0, 0)
+                loading_row.addView(loading_img_tv)
+                try: loading_row.setVisibility(View.GONE)
+                except Exception: pass
+                card.addView(loading_row)
+
+            feed_img_mode = str(self._img_layout_mode or "primary")
+            if images and feed_img_mode == "grid" and len(images) > 1:
+                grid = LinearLayout(ctx)
+                grid.setOrientation(LinearLayout.VERTICAL)
+                lp_grid = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                if str(self._img_preview_mode or "compact") == "full":
+                    lp_grid.bottomMargin = _dp(12)
+                else:
+                    lp_grid.bottomMargin = _dp(10)
+                card.addView(grid, lp_grid)
+                row = None
+                cell_h = _dp(180 if str(self._img_preview_mode or "compact") == "compact" else 240)
+                for img_idx, img_url in enumerate(images):
+                    if img_idx % 2 == 0:
+                        row = LinearLayout(ctx)
+                        row.setOrientation(LinearLayout.HORIZONTAL)
+                        row.setGravity(Gravity.CENTER_VERTICAL)
+                        if img_idx > 0:
+                            try: row.setPadding(0, _dp(8), 0, 0)
+                            except Exception: pass
+                        grid.addView(row, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+                    iv = ImageView(ctx)
+                    iv.setVisibility(View.GONE)
+                    iv.setAdjustViewBounds(True)
+                    try: iv.setScaleType(ImageView.ScaleType.CENTER_CROP)
+                    except Exception: pass
+                    iv.setBackgroundColor(_c("#00000000"))
+                    iv.setClickable(True)
+                    u = img_url
+                    def on_feed_img_click(_v, item=it):
+                        self._bounce_anim(_v)
+                        try: self._open_post_screen(get_last_fragment(), item)
+                        except Exception: pass
+                    iv.setOnClickListener(OnClickListener(on_feed_img_click))
+                    lp_iv = LinearLayout.LayoutParams(0, cell_h, 1.0)
+                    if img_idx % 2 == 0:
+                        lp_iv.rightMargin = _dp(6)
+                    else:
+                        lp_iv.leftMargin = _dp(6)
+                    row.addView(iv, lp_iv)
+                    self._attach_feed_swipe_touch(iv)
+                    self._load_image_into(img_url, iv, quick_preview=True, loading_label=loading_img_tv, loading_spinner=loading_img_pb, loading_container=loading_row)
+                if len(images) % 2 == 1 and row is not None:
+                    spacer = View(ctx)
+                    row.addView(spacer, LinearLayout.LayoutParams(0, cell_h, 1.0))
+            elif img:
                 iv = ImageView(ctx)
                 iv.setVisibility(View.GONE)
                 iv.setAdjustViewBounds(True)
-                try: iv.setScaleType(ImageView.ScaleType.CENTER_CROP)
-                except Exception: pass
+                preview_mode = str(self._img_preview_mode or "compact")
+                if preview_mode == "full":
+                    try: iv.setScaleType(ImageView.ScaleType.FIT_CENTER)
+                    except Exception: pass
+                    ilp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                else:
+                    try: iv.setScaleType(ImageView.ScaleType.CENTER_CROP)
+                    except Exception: pass
+                    ilp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, _dp(240))
                 # Нет закруглений, так как card делает clip!
                 iv.setBackgroundColor(_c("#00000000")) 
-                ilp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, _dp(240))
                 card.addView(iv, ilp)
-                self._load_image_into(img, iv)
+                self._attach_feed_swipe_touch(iv)
+                self._load_image_into(img, iv, quick_preview=True, loading_label=loading_img_tv, loading_spinner=loading_img_pb, loading_container=loading_row)
 
             # CONTENT (Title, text, replies)
             content_box = LinearLayout(ctx)
             content_box.setOrientation(LinearLayout.VERTICAL)
             content_box.setPadding(_dp(16), _dp(12), _dp(16), _dp(16))
             card.addView(content_box)
+            self._attach_feed_swipe_touch(content_box)
 
             if len(images) > 1:
                 tv_more = TextView(ctx)
                 tv_more.setText(_tr(f"+{len(images) - 1} фото", f"+{len(images) - 1} photos"))
                 tv_more.setTextSize(12)
                 tv_more.setTypeface(None, Typeface.BOLD)
-                tv_more.setTextColor(_c(COLOR_ACCENT))
+                tv_more.setTextColor(_c(self._accent()))
                 tv_more.setBackground(self._bg_rounded("#267E57C2", radius_dp=8))
                 tv_more.setPadding(_dp(8), _dp(4), _dp(8), _dp(4))
                 lp_more = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
@@ -2718,6 +4054,7 @@ class Plugin(BasePlugin):
                 tv_title.setTextColor(_c("#FF5555" if veryimportant else COLOR_TEXT_PR))
                 tv_title.setPadding(0, 0, 0, _dp(6) if text else 0)
                 content_box.addView(tv_title)
+                self._attach_feed_swipe_touch(tv_title)
 
             prev = _preview_text(text, 180, title)
             if prev:
@@ -2728,6 +4065,7 @@ class Plugin(BasePlugin):
                 try: tv_prev.setLineSpacing(_dp(3), 1.2)
                 except Exception: pass
                 content_box.addView(tv_prev)
+                self._attach_feed_swipe_touch(tv_prev)
 
 
     def _render_settings(self, ctx):
@@ -2745,6 +4083,119 @@ class Plugin(BasePlugin):
         hint.setTextColor(_c(COLOR_TEXT_SEC))
         hint.setPadding(_dp(4), 0, 0, _dp(8))
         self._list_container.addView(hint)
+
+        img_hint = TextView(ctx)
+        img_hint.setText(_tr("Размер предпросмотра изображений в ленте", "Feed image preview size"))
+        img_hint.setTextSize(14)
+        img_hint.setTextColor(_c(COLOR_TEXT_SEC))
+        img_hint.setPadding(_dp(4), _dp(8), 0, _dp(8))
+        self._list_container.addView(img_hint)
+
+        img_row = LinearLayout(ctx)
+        img_row.setOrientation(LinearLayout.HORIZONTAL)
+        img_row.setGravity(Gravity.CENTER_VERTICAL)
+        lp_img_row = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp_img_row.bottomMargin = _dp(16)
+        self._list_container.addView(img_row, lp_img_row)
+
+        compact_btn = self._top_button(ctx, _tr("Компактно", "Compact"), lambda: self._apply_img_preview_mode_and_reopen("compact"))
+        full_btn = self._top_button(ctx, _tr("Полностью", "Full"), lambda: self._apply_img_preview_mode_and_reopen("full"))
+        compact_active = (self._img_preview_mode == "compact")
+        full_active = (self._img_preview_mode == "full")
+        compact_btn.setBackground(self._bg_rounded(self._accent() if compact_active else "#14FFFFFF", radius_dp=16))
+        full_btn.setBackground(self._bg_rounded(self._accent() if full_active else "#14FFFFFF", radius_dp=16))
+        try: compact_btn.setAlpha(1.0 if compact_active else 0.85)
+        except Exception: pass
+        try: full_btn.setAlpha(1.0 if full_active else 0.85)
+        except Exception: pass
+
+        img_row.addView(compact_btn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
+        img_row.addView(self._spacer_h(ctx, 10))
+        img_row.addView(full_btn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
+
+        feed_layout_hint = TextView(ctx)
+        feed_layout_hint.setText(_tr("Отображение изображений (лента и пост)", "Images display (feed and post)"))
+        feed_layout_hint.setTextSize(14)
+        feed_layout_hint.setTextColor(_c(COLOR_TEXT_SEC))
+        feed_layout_hint.setPadding(_dp(4), 0, 0, _dp(8))
+        self._list_container.addView(feed_layout_hint)
+
+        feed_layout_row = LinearLayout(ctx)
+        feed_layout_row.setOrientation(LinearLayout.HORIZONTAL)
+        feed_layout_row.setGravity(Gravity.CENTER_VERTICAL)
+        lp_feed_layout_row = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp_feed_layout_row.bottomMargin = _dp(16)
+        self._list_container.addView(feed_layout_row, lp_feed_layout_row)
+
+        feed_primary_btn = self._top_button(ctx, _tr("Основное", "Primary"), lambda: self._apply_img_layout_mode_and_reopen("primary"))
+        feed_grid_btn = self._top_button(ctx, _tr("Сетка (все)", "Grid (all)"), lambda: self._apply_img_layout_mode_and_reopen("grid"))
+        feed_primary_active = (self._img_layout_mode == "primary")
+        feed_grid_active = (self._img_layout_mode == "grid")
+        feed_primary_btn.setBackground(self._bg_rounded(self._accent() if feed_primary_active else "#14FFFFFF", radius_dp=16))
+        feed_grid_btn.setBackground(self._bg_rounded(self._accent() if feed_grid_active else "#14FFFFFF", radius_dp=16))
+        try: feed_primary_btn.setAlpha(1.0 if feed_primary_active else 0.85)
+        except Exception: pass
+        try: feed_grid_btn.setAlpha(1.0 if feed_grid_active else 0.85)
+        except Exception: pass
+
+        feed_layout_row.addView(feed_primary_btn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
+        feed_layout_row.addView(self._spacer_h(ctx, 10))
+        feed_layout_row.addView(feed_grid_btn, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0))
+
+        # unified image layout selector already controls both feed and post
+
+        hist_hint = TextView(ctx)
+        hist_hint.setText(_tr("Количество постов в истории", "Posts history count"))
+        hist_hint.setTextSize(14)
+        hist_hint.setTextColor(_c(COLOR_TEXT_SEC))
+        hist_hint.setPadding(_dp(4), 0, 0, _dp(8))
+        self._list_container.addView(hist_hint)
+
+        hist_card = LinearLayout(ctx)
+        hist_card.setOrientation(LinearLayout.VERTICAL)
+        hist_card.setPadding(_dp(20), _dp(20), _dp(20), _dp(20))
+        hist_card.setBackground(self._bg_rounded(COLOR_CARD, COLOR_STROKE, stroke_dp=1, radius_dp=CORNER_RADIUS_DP))
+        lp_hist = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp_hist.bottomMargin = _dp(16)
+        self._list_container.addView(hist_card, lp_hist)
+
+        hist_cur = _clamp_history_posts(self._history_posts)
+        hist_tv = TextView(ctx)
+        hist_tv.setText((_tr("Текущее значение", "Current value") + f": {hist_cur}"))
+        hist_tv.setTextSize(16)
+        hist_tv.setTextColor(_c(COLOR_TEXT_PR))
+        hist_tv.setTypeface(None, Typeface.BOLD)
+        hist_tv.setPadding(0, 0, 0, _dp(16))
+        hist_card.addView(hist_tv)
+
+        sb_hist = SeekBar(ctx)
+        try:
+            sb_hist.setMax(99)
+            sb_hist.setProgress(max(0, min(99, int(hist_cur) - 1)))
+        except Exception:
+            pass
+        hist_card.addView(sb_hist, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        def on_hist_progress(_sb, progress, from_user):
+            try:
+                if not from_user: return
+                val = max(1, min(100, int(progress) + 1))
+                hist_tv.setText((_tr("Текущее значение", "Current value") + f": {val}"))
+            except Exception:
+                pass
+
+        def on_hist_stop(_sb):
+            try:
+                val = max(1, min(100, int(_sb.getProgress() or 0) + 1))
+                self._apply_history_limit(val)
+            except Exception:
+                pass
+
+        try:
+            self._history_seek_listener = _OnSeekBarChangeListener(on_hist_progress, None, on_hist_stop)
+            sb_hist.setOnSeekBarChangeListener(self._history_seek_listener)
+        except Exception:
+            pass
 
         card = LinearLayout(ctx)
         card.setOrientation(LinearLayout.VERTICAL)
@@ -2792,6 +4243,181 @@ class Plugin(BasePlugin):
         reset_btn = self._primary_button(ctx, _tr("Сбросить: 100%", "Reset: 100%"), lambda: self._apply_ui_scale_and_reopen(1.0))
         self._list_container.addView(reset_btn, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
 
+        bg_hint = TextView(ctx)
+        bg_hint.setText(_tr("Интервал автообновления в фоне (сек)", "Background auto-refresh interval (sec)"))
+        bg_hint.setTextSize(14)
+        bg_hint.setTextColor(_c(COLOR_TEXT_SEC))
+        bg_hint.setPadding(_dp(4), _dp(20), 0, _dp(8))
+        self._list_container.addView(bg_hint)
+
+        bg_card = LinearLayout(ctx)
+        bg_card.setOrientation(LinearLayout.VERTICAL)
+        bg_card.setPadding(_dp(20), _dp(20), _dp(20), _dp(20))
+        bg_card.setBackground(self._bg_rounded(COLOR_CARD, COLOR_STROKE, stroke_dp=1, radius_dp=CORNER_RADIUS_DP))
+        lp_bg = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp_bg.bottomMargin = _dp(16)
+        self._list_container.addView(bg_card, lp_bg)
+
+        raw_bg = self.get_setting("bg_refresh_seconds", None)
+        if raw_bg is None:
+            try: raw_bg = int(round(float(self.get_setting("bg_refresh_minutes", "3")) * 60.0))
+            except Exception: raw_bg = 180
+        cur_bg = _clamp_bg_refresh_seconds(raw_bg)
+        bg_tv = TextView(ctx)
+        bg_tv.setText((_tr("Текущее значение", "Current value") + f": {cur_bg} сек"))
+        bg_tv.setTextSize(16)
+        bg_tv.setTextColor(_c(COLOR_TEXT_PR))
+        bg_tv.setTypeface(None, Typeface.BOLD)
+        bg_tv.setPadding(0, 0, 0, _dp(16))
+        bg_card.addView(bg_tv)
+
+        sb_bg = SeekBar(ctx)
+        try:
+            sb_bg.setMax(179)
+            sb_bg.setProgress(max(0, min(179, int((cur_bg - 10) / 10))))
+        except Exception: pass
+        bg_card.addView(sb_bg, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        def on_bg_progress(_sb, progress, from_user):
+            try:
+                if not from_user: return
+                val = max(10, min(1800, (int(progress) + 1) * 10))
+                bg_tv.setText((_tr("Текущее значение", "Current value") + f": {val} сек"))
+            except Exception: pass
+
+        def on_bg_stop(_sb):
+            try:
+                val = max(10, min(1800, (int(_sb.getProgress() or 0) + 1) * 10))
+                self.set_setting("bg_refresh_seconds", str(val))
+                self.set_setting("bg_refresh_minutes", str(int(round(float(val) / 60.0))))
+                bg_tv.setText((_tr("Текущее значение", "Current value") + f": {val} сек"))
+            except Exception: pass
+
+        try:
+            self._bg_minutes_seek_listener = _OnSeekBarChangeListener(on_bg_progress, None, on_bg_stop)
+            sb_bg.setOnSeekBarChangeListener(self._bg_minutes_seek_listener)
+        except Exception: pass
+
+        hint_corner = TextView(ctx)
+        hint_corner.setText(_tr("Общее закругление интерфейса", "Global corner roundness"))
+        hint_corner.setTextSize(14)
+        hint_corner.setTextColor(_c(COLOR_TEXT_SEC))
+        hint_corner.setPadding(_dp(4), _dp(20), 0, _dp(8))
+        self._list_container.addView(hint_corner)
+
+        card_corner = LinearLayout(ctx)
+        card_corner.setOrientation(LinearLayout.VERTICAL)
+        card_corner.setPadding(_dp(20), _dp(20), _dp(20), _dp(20))
+        card_corner.setBackground(self._bg_rounded(COLOR_CARD, COLOR_STROKE, stroke_dp=1, radius_dp=CORNER_RADIUS_DP))
+        lp_cc = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp_cc.bottomMargin = _dp(16)
+        self._list_container.addView(card_corner, lp_cc)
+
+        corner_tv = TextView(ctx)
+        corner_tv.setText((_tr("Текущее закругление", "Current roundness") + f": {self._corner_scale_percent()}%"))
+        corner_tv.setTextSize(16)
+        corner_tv.setTextColor(_c(COLOR_TEXT_PR))
+        corner_tv.setTypeface(None, Typeface.BOLD)
+        corner_tv.setPadding(0, 0, 0, _dp(16))
+        card_corner.addView(corner_tv)
+
+        sb_corner = SeekBar(ctx)
+        max_corner = max(1, self._corner_scale_to_progress(_CORNER_SCALE_MAX))
+        cur_corner = self._corner_scale_to_progress(self._corner_scale)
+        try:
+            sb_corner.setMax(max_corner)
+            sb_corner.setProgress(max(0, min(max_corner, cur_corner)))
+        except Exception: pass
+        card_corner.addView(sb_corner, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        def on_corner_progress(_sb, progress, from_user):
+            try:
+                if not from_user: return
+                val = self._progress_to_corner_scale(int(progress))
+                corner_tv.setText((_tr("Текущее закругление", "Current roundness") + f": {int(round(val * 100))}%"))
+            except Exception: pass
+
+        def on_corner_stop(_sb):
+            try:
+                val = self._progress_to_corner_scale(int(_sb.getProgress() or 0))
+                self._apply_corner_scale_and_reopen(val)
+            except Exception: pass
+
+        try:
+            self._corner_seek_listener = _OnSeekBarChangeListener(on_corner_progress, None, on_corner_stop)
+            sb_corner.setOnSeekBarChangeListener(self._corner_seek_listener)
+        except Exception: pass
+
+        accent_hint = TextView(ctx)
+        accent_hint.setText(_tr("Акцентный цвет", "Accent color"))
+        accent_hint.setTextSize(14)
+        accent_hint.setTextColor(_c(COLOR_TEXT_SEC))
+        accent_hint.setPadding(_dp(4), _dp(16), 0, _dp(8))
+        self._list_container.addView(accent_hint)
+
+        accent_card = LinearLayout(ctx)
+        accent_card.setOrientation(LinearLayout.VERTICAL)
+        accent_card.setPadding(_dp(20), _dp(20), _dp(20), _dp(20))
+        accent_card.setBackground(self._bg_rounded(COLOR_CARD, COLOR_STROKE, stroke_dp=1, radius_dp=CORNER_RADIUS_DP))
+        lp_ac = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp_ac.bottomMargin = _dp(16)
+        self._list_container.addView(accent_card, lp_ac)
+
+        accent_tv = TextView(ctx)
+        accent_tv.setText((_tr("Текущий акцент", "Current accent") + f": {self._accent()}"))
+        accent_tv.setTextSize(16)
+        accent_tv.setTextColor(_c(self._accent()))
+        accent_tv.setTypeface(None, Typeface.BOLD)
+        accent_tv.setPadding(0, 0, 0, _dp(16))
+        accent_card.addView(accent_tv)
+
+        sb_accent = SeekBar(ctx)
+        palette = self._accent_palette()
+        max_accent = max(0, len(palette) - 1)
+        cur_accent = self._accent_to_progress(self._accent())
+        try:
+            sb_accent.setMax(max_accent)
+            sb_accent.setProgress(max(0, min(max_accent, cur_accent)))
+        except Exception: pass
+        accent_card.addView(sb_accent, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+
+        def on_accent_progress(_sb, progress, from_user):
+            try:
+                if not from_user: return
+                col = self._progress_to_accent(int(progress))
+                accent_tv.setText((_tr("Текущий акцент", "Current accent") + f": {col}"))
+                accent_tv.setTextColor(_c(col))
+            except Exception: pass
+
+        def on_accent_stop(_sb):
+            try:
+                col = self._progress_to_accent(int(_sb.getProgress() or 0))
+                self._apply_accent_and_reopen(col)
+            except Exception: pass
+
+        try:
+            self._accent_seek_listener = _OnSeekBarChangeListener(on_accent_progress, None, on_accent_stop)
+            sb_accent.setOnSeekBarChangeListener(self._accent_seek_listener)
+        except Exception: pass
+
+        accent_input = EditText(ctx)
+        accent_input.setSingleLine(True)
+        accent_input.setText(self._accent())
+        accent_input.setHint("#FF7E57C2")
+        accent_input.setTextColor(_c(COLOR_TEXT_PR))
+        try: accent_input.setHintTextColor(_c(COLOR_TEXT_SEC))
+        except Exception: pass
+        accent_input.setBackground(self._bg_rounded("#14FFFFFF", radius_dp=14))
+        accent_input.setPadding(_dp(14), _dp(12), _dp(14), _dp(12))
+        lp_ai = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp_ai.topMargin = _dp(12)
+        accent_card.addView(accent_input, lp_ai)
+
+        apply_accent_btn = self._primary_button(ctx, _tr("Применить HEX", "Apply HEX"), lambda: self._apply_accent_and_reopen(str(accent_input.getText().toString())))
+        lp_ab = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        lp_ab.topMargin = _dp(10)
+        accent_card.addView(apply_accent_btn, lp_ab)
+
     def _render_subs(self, ctx):
         entries = self._get_sub_entries()
 
@@ -2835,7 +4461,8 @@ class Plugin(BasePlugin):
                 
                 if self._animate_list_once and idx < 12: self._animate_entry(row, idx)
 
-                show = ("@" + sub.split(":", 1)[1]) if sub.startswith("tguser:") else sub
+                show = _sub_to_label(sub)
+                is_excluded = sub in set(self._sub_exclude_filters or [])
 
                 txt_col = LinearLayout(ctx)
                 txt_col.setOrientation(LinearLayout.VERTICAL)
@@ -2845,7 +4472,7 @@ class Plugin(BasePlugin):
                 tv.setText(show)
                 tv.setTextSize(16)
                 tv.setTypeface(None, Typeface.BOLD)
-                tv.setTextColor(_c(COLOR_TEXT_PR))
+                tv.setTextColor(_c("#FFFF6B6B" if is_excluded else COLOR_TEXT_PR))
                 txt_col.addView(tv)
 
                 if cat:
@@ -2856,10 +4483,22 @@ class Plugin(BasePlugin):
                     tv_cat.setPadding(0, _dp(4), 0, 0)
                     txt_col.addView(tv_cat)
 
+                ex_btn = self._top_button(ctx, _tr(" исключить ", " exclude "), lambda key=sub: self._toggle_sub_exclude_filter(key))
+                if is_excluded:
+                    ex_btn.setBackground(self._bg_rounded("#33FF3B30", radius_dp=16))
+                    try: ex_btn.setAlpha(1.0)
+                    except Exception: pass
+                else:
+                    ex_btn.setBackground(self._bg_rounded("#1AFFFFFF", radius_dp=16))
+                    try: ex_btn.setAlpha(0.85)
+                    except Exception: pass
+
                 cat_btn = self._top_button(ctx, " ✎ ", lambda key=sub: self._open_category_screen(key))
                 delb = self._top_button(ctx, " ✕ ", lambda key=sub: self._remove_sub(key))
                 delb.setBackground(self._bg_rounded("#26FF3B30", radius_dp=16)) # Red warning color
                 
+                row.addView(ex_btn)
+                row.addView(self._spacer_h(ctx, 8))
                 row.addView(cat_btn)
                 row.addView(self._spacer_h(ctx, 8))
                 row.addView(delb)
@@ -2982,6 +4621,27 @@ class Plugin(BasePlugin):
         if not sub_key: return
         entries = [x for x in self._get_sub_entries() if str(x.get("sub") or "") != sub_key]
         self._set_sub_entries(entries)
+        if self._sub_exclude_filters:
+            self._sub_exclude_filters = [x for x in self._sub_exclude_filters if x != sub_key]
+            try:
+                self.set_setting("sub_exclude_filters", json.dumps(self._sub_exclude_filters, ensure_ascii=False))
+            except Exception:
+                pass
+        # Если подписка удалена полностью — чистим связанные кэш-записи.
+        old_cache = self._get_cache()
+        kept = []
+        for it in old_cache:
+            src_handle = str(it.get("source_handle", "") or "").strip()
+            src = str(it.get("source", "") or "").strip()
+            drop = False
+            if src_handle.startswith("@") and sub_key.startswith("tguser:"):
+                drop = (_norm_sub("tguser:" + src_handle[1:]) == sub_key)
+            if (not drop) and src:
+                drop = (_norm_sub(src) == sub_key)
+            if not drop:
+                kept.append(it)
+        if len(kept) != len(old_cache):
+            self._set_cache(kept)
         self._render()
         if self._overlay is not None: self._set_refreshing_ui(True)
         self._refresh_async()
